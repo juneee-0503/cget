@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: cget documentation
+    url: https://github.com/juneee_0503/cget/tree/main/docs
+    about: Read the project documentation before opening a question.

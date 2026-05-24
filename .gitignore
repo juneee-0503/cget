@@ -56,11 +56,20 @@ logs/
 *~
 
 # Runtime data
+.cget/
 downloads/
 tasks/
 temp/
 *.state
 config.json
+
+# Test output
+Testing/
+coverage/
+
+# Native IDE/project files
+*.xcworkspace
+*.xcodeproj
 
 # Sanitizer and profiling output
 asan.log*
