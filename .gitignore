@@ -1,0 +1,69 @@
+# Build directories
+build/
+build-*/
+cmake-build-*/
+out/
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+CTestTestfile.cmake
+cmake_install.cmake
+compile_commands.json
+Makefile
+*.cmake
+!CMakeLists.txt
+
+# Ninja
+.ninja_deps
+.ninja_log
+build.ninja
+rules.ninja
+
+# Binaries
+*.o
+*.obj
+*.exe
+*.out
+*.a
+*.so
+*.dylib
+*.dll
+*.lib
+*.pdb
+*.app
+/cget
+/cget_unit_tests
+/cget_stress_tests
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# Runtime data
+downloads/
+tasks/
+temp/
+*.state
+config.json
+
+# Sanitizer and profiling output
+asan.log*
+tsan.log*
+*.profraw
+*.profdata
