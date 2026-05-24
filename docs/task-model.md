@@ -2,13 +2,22 @@
 
 ## Task
 
-任务包含 URL、目标路径、临时目录、状态、文件大小、下载进度、Chunk 列表、错误信息、SHA256 期望值和远程元数据。
+任务包含 URL、目标路径、临时目录、状态、文件大小、下载进度、Chunk 列表、错误信息、SHA256 期望值、远程元数据、任务级限速和调度统计字段。
 
-v1.1 持久化的远程元数据包括：
+当前持久化的远程元数据包括：
 
 - `remote_etag`
 - `remote_last_modified`
 - `final_url`
+
+v1.2 新增的可选字段包括：
+
+- `task_rate_limit_bytes_per_sec`
+- `scheduler_max_chunks`
+- `scheduler_priority`
+- `peak_speed_bytes_per_sec`
+- `failed_chunk_count`
+- `retry_count`
 
 ## Chunk
 

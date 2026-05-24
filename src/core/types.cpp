@@ -119,6 +119,12 @@ DownloadTask::DownloadTask(const DownloadTask& other)
       remoteEtag(other.remoteEtag),
       remoteLastModified(other.remoteLastModified),
       finalUrl(other.finalUrl),
+      taskRateLimitBytesPerSec(other.taskRateLimitBytesPerSec),
+      schedulerMaxChunks(other.schedulerMaxChunks),
+      schedulerPriority(other.schedulerPriority),
+      peakSpeedBytesPerSec(other.peakSpeedBytesPerSec),
+      failedChunks(other.failedChunks),
+      persistedRetryCount(other.persistedRetryCount),
       requestedThreads(other.requestedThreads) {}
 
 DownloadTask& DownloadTask::operator=(const DownloadTask& other) {
@@ -142,6 +148,12 @@ DownloadTask& DownloadTask::operator=(const DownloadTask& other) {
     remoteEtag = other.remoteEtag;
     remoteLastModified = other.remoteLastModified;
     finalUrl = other.finalUrl;
+    taskRateLimitBytesPerSec = other.taskRateLimitBytesPerSec;
+    schedulerMaxChunks = other.schedulerMaxChunks;
+    schedulerPriority = other.schedulerPriority;
+    peakSpeedBytesPerSec = other.peakSpeedBytesPerSec;
+    failedChunks = other.failedChunks;
+    persistedRetryCount = other.persistedRetryCount;
     requestedThreads = other.requestedThreads;
     return *this;
 }
@@ -164,6 +176,12 @@ DownloadTask::DownloadTask(DownloadTask&& other) noexcept
       remoteEtag(std::move(other.remoteEtag)),
       remoteLastModified(std::move(other.remoteLastModified)),
       finalUrl(std::move(other.finalUrl)),
+      taskRateLimitBytesPerSec(std::move(other.taskRateLimitBytesPerSec)),
+      schedulerMaxChunks(other.schedulerMaxChunks),
+      schedulerPriority(other.schedulerPriority),
+      peakSpeedBytesPerSec(other.peakSpeedBytesPerSec),
+      failedChunks(other.failedChunks),
+      persistedRetryCount(other.persistedRetryCount),
       requestedThreads(other.requestedThreads) {}
 
 DownloadTask& DownloadTask::operator=(DownloadTask&& other) noexcept {
@@ -187,6 +205,12 @@ DownloadTask& DownloadTask::operator=(DownloadTask&& other) noexcept {
     remoteEtag = std::move(other.remoteEtag);
     remoteLastModified = std::move(other.remoteLastModified);
     finalUrl = std::move(other.finalUrl);
+    taskRateLimitBytesPerSec = std::move(other.taskRateLimitBytesPerSec);
+    schedulerMaxChunks = other.schedulerMaxChunks;
+    schedulerPriority = other.schedulerPriority;
+    peakSpeedBytesPerSec = other.peakSpeedBytesPerSec;
+    failedChunks = other.failedChunks;
+    persistedRetryCount = other.persistedRetryCount;
     requestedThreads = other.requestedThreads;
     return *this;
 }
@@ -263,10 +287,22 @@ TaskSnapshot snapshotTask(const DownloadTask& task) {
     snapshot.remoteEtag = task.remoteEtag;
     snapshot.remoteLastModified = task.remoteLastModified;
     snapshot.finalUrl = task.finalUrl;
+    snapshot.taskRateLimitBytesPerSec = task.taskRateLimitBytesPerSec;
+    snapshot.schedulerMaxChunks = task.schedulerMaxChunks;
+    snapshot.schedulerPriority = task.schedulerPriority;
+    snapshot.peakSpeedBytesPerSec = task.peakSpeedBytesPerSec;
+    snapshot.failedChunks = task.failedChunks;
+    snapshot.retryCount = task.persistedRetryCount;
     snapshot.totalChunks = static_cast<std::uint32_t>(task.chunks.size());
     for (const auto& chunk : task.chunks) {
         if (chunk.status == ChunkStatus::Completed) {
             ++snapshot.completedChunks;
+        }
+        if (chunk.status == ChunkStatus::Downloading) {
+            ++snapshot.runningChunks;
+        }
+        if (chunk.status == ChunkStatus::Failed) {
+            ++snapshot.failedChunks;
         }
         snapshot.retryCount += chunk.retryCount;
     }

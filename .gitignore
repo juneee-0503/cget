@@ -62,6 +62,7 @@ tasks/
 temp/
 *.state
 config.json
+metrics.json
 
 # Test output
 Testing/

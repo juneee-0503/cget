@@ -13,6 +13,7 @@ enum class CommandType {
     Remove,
     Run,
     List,
+    Stats,
     Status,
     ConfigGet,
     ConfigSet,

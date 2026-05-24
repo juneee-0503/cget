@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(cget VERSION 1.1.0 LANGUAGES CXX)
+project(cget VERSION 1.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -30,10 +30,14 @@ add_library(cget_core
         src/crypto/sha256.cpp
         src/engine/download_engine.cpp
         src/filesystem/filesystem_service.cpp
+        src/metrics/metrics_service.cpp
         src/network/http_protocol_handler.cpp
         src/network/protocol_registry.cpp
         src/persistence/json.cpp
         src/persistence/persistence_store.cpp
+        src/ratelimit/bandwidth.cpp
+        src/ratelimit/rate_limiter.cpp
+        src/scheduler/scheduler.cpp
 )
 
 target_include_directories(cget_core PUBLIC include)

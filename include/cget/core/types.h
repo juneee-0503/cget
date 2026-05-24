@@ -50,6 +50,8 @@ struct CreateTaskRequest {
     std::optional<std::filesystem::path> outputPath;
     std::optional<std::string> fileName;
     std::optional<std::string> expectedSha256;
+    std::optional<std::uint64_t> taskRateLimitBytesPerSec;
+    bool taskRateLimitOverride = false;
     std::uint32_t requestedThreads = 0;
     bool forceOverwrite = false;
     bool queueOnly = false;
@@ -98,6 +100,12 @@ struct DownloadTask {
     std::optional<std::string> remoteEtag;
     std::optional<std::string> remoteLastModified;
     std::optional<std::string> finalUrl;
+    std::optional<std::uint64_t> taskRateLimitBytesPerSec;
+    std::uint32_t schedulerMaxChunks = 0;
+    std::uint32_t schedulerPriority = 0;
+    double peakSpeedBytesPerSec = 0.0;
+    std::uint32_t failedChunks = 0;
+    std::uint32_t persistedRetryCount = 0;
     std::uint32_t requestedThreads = 0;
     mutable std::mutex mutex;
 
@@ -122,10 +130,17 @@ struct TaskSnapshot {
     std::optional<std::string> remoteEtag;
     std::optional<std::string> remoteLastModified;
     std::optional<std::string> finalUrl;
+    std::optional<std::uint64_t> taskRateLimitBytesPerSec;
     std::uint32_t completedChunks = 0;
     std::uint32_t totalChunks = 0;
+    std::uint32_t runningChunks = 0;
+    std::uint32_t failedChunks = 0;
     std::uint32_t retryCount = 0;
+    std::uint32_t schedulerMaxChunks = 0;
+    std::uint32_t schedulerPriority = 0;
+    double currentSpeedBytesPerSec = 0.0;
     double averageSpeedBytesPerSec = 0.0;
+    double peakSpeedBytesPerSec = 0.0;
     std::optional<std::chrono::seconds> eta;
 };
 

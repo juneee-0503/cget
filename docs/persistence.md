@@ -12,6 +12,7 @@
 ├── tasks/
 │   ├── task_<id>.json
 │   └── task_<id>.json.bak
+├── metrics.json
 └── temp/
     └── <task-id>/
         ├── chunk_0.part
@@ -22,7 +23,9 @@
 
 ## 任务 JSON
 
-任务 JSON 保存任务状态、路径、Chunk、进度、错误信息、SHA256 和远程元数据。v1.1 继续兼容旧任务 JSON，缺失的新字段按空值处理。
+任务 JSON 保存任务状态、路径、Chunk、进度、错误信息、SHA256、远程元数据、限速和调度统计字段。v1.2 继续兼容旧任务 JSON，缺失的新字段按空值处理。
+
+`metrics.json` 是运行时快照文件，用于 `cget stats`。它不是任务状态的唯一来源，损坏或缺失不会影响下载恢复。
 
 ## 写入策略
 

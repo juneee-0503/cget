@@ -2,7 +2,7 @@
 
 ## 当前测试
 
-- 单元测试：CLI parser、Chunk planner、状态机、配置、错误模型、日志、持久化、恢复、SHA256、协议注册、下载引擎。
+- 单元测试：CLI parser、Chunk planner、状态机、配置、错误模型、日志、持久化、恢复、SHA256、协议注册、下载引擎、Scheduler、Metrics、RateLimiter。
 - Stress 测试：多任务并发下载和 SHA256 校验，可通过 `CGET_BUILD_STRESS_TESTS=ON` 开启。
 - CI：Debug build、Release build、unit tests、ASAN，TSAN 作为 continue-on-error job。
 

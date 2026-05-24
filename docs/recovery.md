@@ -14,7 +14,7 @@
 
 ## 远程元数据检查
 
-v1.1 会保存 `ETag`、`Last-Modified` 和最终 URL。继续下载前，如果发现已保存的 ETag 或 Last-Modified 与服务器返回值不一致，任务会进入 `MetadataMismatch`，不会自动覆盖本地数据。
+当前版本会保存 `ETag`、`Last-Modified` 和最终 URL。继续下载前，如果发现已保存的 ETag 或 Last-Modified 与服务器返回值不一致，任务会进入 `MetadataMismatch`，不会自动覆盖本地数据。
 
 ## 后续计划
 

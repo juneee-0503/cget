@@ -22,13 +22,14 @@ Chinese engineering documentation is available under [`docs/`](docs/README.md). 
 - **HTTP / HTTPS download foundation**: Uses libcurl for HTTP and HTTPS transfers, including metadata requests, redirects, TLS handling through libcurl, and streaming writes.
 - **Resume support**: Stores task metadata and chunk progress so interrupted tasks can be recovered and resumed.
 - **Multi-threaded chunk download design**: Supports chunk planning and concurrent range downloads when a server and protocol support byte ranges.
-- **Task scheduling**: Supports queued tasks and foreground queue execution with configurable active task concurrency.
+- **Task scheduling**: Supports queued foreground execution through a scheduler module with FIFO ordering, global worker limits, concurrent task limits, and per-task chunk quotas.
 - **Persistent task state**: Writes task JSON files under the cget home directory and keeps backup files for recovery from corrupted writes.
 - **Retry mechanism**: Retries recoverable chunk failures with configurable retry count and base delay.
 - **Network interruption recovery**: Repairs in-memory task progress from actual partial files during recovery, so stale JSON progress is corrected conservatively.
 - **Remote metadata checks**: Stores ETag, Last-Modified, and final URL metadata where available, and blocks unsafe resume attempts when remote metadata changes.
 - **SHA256 verification**: Supports task-level `--sha256` validation after the final file is assembled.
-- **Rate limiting**: Supports a global `max_download_rate_bytes_per_sec` configuration value.
+- **Rate limiting**: Supports legacy global byte-per-second limiting plus v1.2 global and per-task Token Bucket limits such as `--limit 5MB`.
+- **Runtime metrics**: Writes a lightweight `metrics.json` snapshot for `cget stats`, including task counts, worker utilization, scheduler queue size, and aggregate speeds.
 - **Proxy support**: Supports optional libcurl proxy configuration for HTTP, HTTPS, and SOCKS-style proxy URLs.
 - **Configurable logging**: Supports log levels, file logging, optional console logging, and simple log rotation.
 - **Modular architecture**: Keeps CLI, core task logic, engine, network, persistence, filesystem, config, logging, and tests in separate modules.
@@ -46,6 +47,9 @@ cget uses a layered architecture with narrow responsibilities:
 - **Persistence layer**: Serializes task state to JSON, loads task files, repairs progress from partial files, and removes task metadata when requested.
 - **Filesystem layer**: Owns cget home paths, task temp directories, output path resolution, safe chunk paths, file truncation, and chunk merging.
 - **Config layer**: Reads and writes `config.json`, including thread limits, active task limits, retry policy, rate limits, and proxy settings.
+- **Scheduler layer**: Coordinates queued foreground work with FIFO scheduling, worker limits, task concurrency, and per-task chunk quotas.
+- **Rate-limit layer**: Applies global and task-level Token Bucket throttling without holding manager-wide locks while waiting.
+- **Metrics layer**: Samples task and scheduler snapshots and writes a runtime metrics file that another CLI process can inspect with `cget stats`.
 - **Test layer**: Provides unit tests and optional stress tests using fake protocol handlers so core behavior can be verified without external network dependencies.
 
 The design keeps product entrypoints separated from download mechanics. CLI commands call application services; the download manager coordinates persisted tasks; the engine executes task lifecycle; protocol handlers shield the engine from HTTP/FTP/SFTP differences; persistence makes disk state authoritative during recovery; queue execution controls foreground concurrency.
@@ -65,8 +69,11 @@ cget/
 │       ├── crypto/
 │       ├── engine/
 │       ├── filesystem/
+│       ├── metrics/
 │       ├── network/
-│       └── persistence/
+│       ├── persistence/
+│       ├── ratelimit/
+│       └── scheduler/
 ├── docs/
 │   ├── README.md
 │   ├── architecture.md
@@ -91,8 +98,11 @@ cget/
 │   ├── crypto/
 │   ├── engine/
 │   ├── filesystem/
+│   ├── metrics/
 │   ├── network/
-│   └── persistence/
+│   ├── persistence/
+│   ├── ratelimit/
+│   └── scheduler/
 ├── tests/
 │   ├── stress/
 │   └── unit/
@@ -181,11 +191,13 @@ cget protocols
 
 cget add https://example.com/file.zip
 cget add https://example.com/file.zip -o ./file.zip --threads 4
+cget add https://example.com/file.zip --limit 5MB
 cget add https://example.com/file.zip --sha256 <64-character-hex-digest>
 cget add https://example.com/file.zip --queue
 
 cget run
 cget list
+cget stats
 cget status <task-id>
 cget pause <task-id>
 cget resume <task-id>
@@ -199,6 +211,10 @@ cget config set download.max_active_tasks 2
 cget config set network.max_retries 3
 cget config set network.retry_base_delay_ms 1000
 cget config set download.max_download_rate_bytes_per_sec 0
+cget config set scheduler.max_global_workers 16
+cget config set scheduler.max_chunks_per_task 4
+cget config set rate_limit.global 20MB
+cget config set rate_limit.default_per_task unlimited
 cget config set network.proxy none
 cget config set network.proxy http://127.0.0.1:8080
 cget config set logging.level debug
@@ -224,7 +240,8 @@ Legacy config keys such as `max_threads`, `max_active_tasks`, `max_retries`, `re
 - **libcurl**: Used for network transfers and runtime protocol capability detection.
 - **Internal JSON utility**: Minimal project-local JSON parser/writer for task and config persistence.
 - **Internal SHA256 implementation**: Used for optional file verification.
-- **Planned / Optional**: Boost.Asio or standalone Asio for future advanced networking, OpenSSL for future explicit crypto/TLS features, package-manager-specific integration, and richer CI release workflows.
+- **Internal scheduler, metrics, and rate-limit modules**: Implement foreground fairness, runtime observability, and Token Bucket throttling without new third-party dependencies.
+- **Planned / Optional**: Boost.Asio or standalone Asio for future advanced networking, OpenSSL for future explicit crypto/TLS features, package-manager-specific integration, and richer release workflows.
 
 ## Development
 
@@ -282,4 +299,4 @@ No `LICENSE` file is currently included. MIT License is a reasonable default for
 
 ## Project Status
 
-> cget is currently in the v1.1 engineering hardening stage. APIs, command syntax, and internal architecture may change before the first stable release.
+> cget is currently in the v1.2 scheduling and observability stage. APIs, command syntax, and internal architecture may change before the first stable release.

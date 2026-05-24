@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <iomanip>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <vector>
 
@@ -9,7 +10,9 @@
 #include "cget/core/download_manager.h"
 #include "cget/core/errors.h"
 #include "cget/filesystem/filesystem_service.h"
+#include "cget/metrics/metrics_service.h"
 #include "cget/network/protocol_registry.h"
+#include "cget/ratelimit/bandwidth.h"
 
 namespace {
 
@@ -30,6 +33,9 @@ void printTaskSummary(const cget::DownloadTask& task) {
     if (snapshot.expectedSha256) {
         std::cout << "SHA256: " << *snapshot.expectedSha256 << '\n';
     }
+    if (snapshot.taskRateLimitBytesPerSec) {
+        std::cout << "Limit: " << cget::formatRateLimit(snapshot.taskRateLimitBytesPerSec) << '\n';
+    }
 }
 
 void printSnapshot(const cget::TaskSnapshot& snapshot) {
@@ -44,13 +50,21 @@ void printSnapshot(const cget::TaskSnapshot& snapshot) {
         std::cout << " / " << cget::formatBytes(snapshot.fileSize);
     }
     std::cout << '\n'
+              << "Current speed: " << cget::formatBytes(static_cast<std::uint64_t>(snapshot.currentSpeedBytesPerSec))
+              << "/s\n"
               << "Average speed: " << cget::formatBytes(static_cast<std::uint64_t>(snapshot.averageSpeedBytesPerSec))
               << "/s\n";
     if (snapshot.eta) {
         std::cout << "ETA: " << snapshot.eta->count() << "s\n";
     }
-    std::cout << "Chunks: " << snapshot.completedChunks << " / " << snapshot.totalChunks << " completed\n"
+    std::cout << "Chunks: " << snapshot.completedChunks << " / " << snapshot.totalChunks << " completed, "
+              << snapshot.runningChunks << " running, " << snapshot.failedChunks << " failed\n"
               << "Retries: " << snapshot.retryCount << '\n';
+    std::cout << "Scheduler quota: "
+              << (snapshot.schedulerMaxChunks == 0 ? std::string("default")
+                                                   : std::to_string(snapshot.schedulerMaxChunks))
+              << "\n";
+    std::cout << "Rate limit: " << cget::formatRateLimit(snapshot.taskRateLimitBytesPerSec) << '\n';
     if (snapshot.lastError) {
         std::cout << "Error: " << *snapshot.lastError << '\n';
     }
@@ -76,20 +90,40 @@ void printList(const std::vector<cget::TaskSnapshot>& tasks) {
     std::cout << std::left << std::setw(20) << "ID"
               << std::setw(24) << "File"
               << std::setw(12) << "Progress"
-              << std::setw(16) << "Downloaded"
-              << std::setw(14) << "Avg Speed"
+              << std::setw(16) << "Current Speed"
+              << std::setw(10) << "ETA"
+              << std::setw(12) << "Chunks"
               << "Status\n";
     for (const auto& task : tasks) {
         std::ostringstream progress;
         progress << std::fixed << std::setprecision(1) << task.progress << "%";
+        const auto eta = task.eta ? std::to_string(task.eta->count()) + "s" : "-";
+        const auto chunks = std::to_string(task.completedChunks) + "/" + std::to_string(task.totalChunks);
         std::cout << std::left << std::setw(20) << task.id.substr(0, 19)
                   << std::setw(24) << task.fileName.substr(0, 23)
                   << std::setw(12) << progress.str()
-                  << std::setw(16) << cget::formatBytes(task.downloaded)
-                  << std::setw(14)
-                  << (cget::formatBytes(static_cast<std::uint64_t>(task.averageSpeedBytesPerSec)) + "/s")
+                  << std::setw(16)
+                  << (cget::formatBytes(static_cast<std::uint64_t>(task.currentSpeedBytesPerSec)) + "/s")
+                  << std::setw(10) << eta
+                  << std::setw(12) << chunks
                   << cget::toString(task.status) << '\n';
     }
+}
+
+void printStats(const cget::SystemMetrics& metrics) {
+    std::cout << "Runtime: " << (metrics.stale ? "stale" : "active") << '\n'
+              << "Updated: " << cget::formatTimestamp(metrics.updatedAt) << '\n'
+              << "Tasks: " << metrics.totalTasks << " total, " << metrics.activeTasks << " active, "
+              << metrics.queuedTasks << " queued, " << metrics.pausedTasks << " paused, "
+              << metrics.failedTasks << " failed, " << metrics.completedTasks << " completed\n"
+              << "Workers: " << metrics.busyWorkers << " / " << metrics.totalWorkers << " busy ("
+              << std::fixed << std::setprecision(1) << metrics.workerUtilization << "%)\n"
+              << "Global current speed: "
+              << cget::formatBytes(static_cast<std::uint64_t>(metrics.globalCurrentSpeedBytesPerSec)) << "/s\n"
+              << "Global average speed: "
+              << cget::formatBytes(static_cast<std::uint64_t>(metrics.globalAverageSpeedBytesPerSec)) << "/s\n"
+              << "Scheduler queue: " << metrics.schedulerQueueSize << '\n'
+              << "Scheduler policy: " << metrics.schedulerPolicy << '\n';
 }
 
 void printProtocols() {
@@ -113,6 +147,14 @@ std::uint32_t parseThreads(const cget::Command& command) {
     return static_cast<std::uint32_t>(std::stoul(it->second));
 }
 
+std::optional<std::uint64_t> parseLimit(const cget::Command& command) {
+    const auto it = command.options.find("limit");
+    if (it == command.options.end()) {
+        return std::nullopt;
+    }
+    return cget::parseBandwidthLimit(it->second);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -131,6 +173,16 @@ int main(int argc, char** argv) {
             {
                 cget::DownloadManager manager;
                 printList(manager.listTasks());
+                return 0;
+            }
+            case cget::CommandType::Stats:
+            {
+                cget::FileSystemService fs;
+                if (const auto metrics = cget::MetricsService::loadRuntimeSnapshot(fs)) {
+                    printStats(*metrics);
+                } else {
+                    std::cout << "No runtime metrics snapshot. Start a download or run queued tasks first.\n";
+                }
                 return 0;
             }
             case cget::CommandType::Status:
@@ -173,7 +225,8 @@ int main(int argc, char** argv) {
                         std::cout << key << " = " << value << '\n';
                     }
                 } else {
-                    std::cout << command.args.at(0) << " = " << config.get(command.args.at(0)) << '\n';
+                    const auto value = config.get(command.args.at(0));
+                    std::cout << command.args.at(0) << " = " << value << '\n';
                 }
                 return 0;
             }
@@ -200,6 +253,10 @@ int main(int argc, char** argv) {
                 request.requestedThreads = parseThreads(command);
                 request.forceOverwrite = command.options.find("force") != command.options.end();
                 request.queueOnly = command.options.find("queue") != command.options.end();
+                if (command.options.find("limit") != command.options.end()) {
+                    request.taskRateLimitOverride = true;
+                    request.taskRateLimitBytesPerSec = parseLimit(command);
+                }
                 if (const auto it = command.options.find("sha256"); it != command.options.end()) {
                     request.expectedSha256 = it->second;
                 }

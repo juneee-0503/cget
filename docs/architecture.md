@@ -13,6 +13,9 @@ cget 的架构目标是把命令解析、任务生命周期、下载执行、协
 - Persistence 层：读写任务 JSON，扫描任务目录，按 part 文件修正进度。
 - Filesystem 层：解析输出路径、创建目录、合并 chunk、保护 temp path。
 - Config 层：加载默认值、配置文件、环境变量和 CLI 覆盖值。
+- Scheduler 层：控制前台队列执行中的全局 worker、并发任务数和每任务 Chunk 配额。
+- RateLimiter 层：用 Token Bucket 统一处理全局限速和任务级限速。
+- Metrics 层：从任务快照和调度快照计算运行时统计，并写入 `metrics.json` 供 `cget stats` 读取。
 
 ## 边界原则
 
@@ -20,4 +23,4 @@ cget 的架构目标是把命令解析、任务生命周期、下载执行、协
 
 ## 当前限制
 
-cget 当前仍是前台运行模型，没有后台 daemon，也没有跨进程实时控制运行中的任务。队列执行支持并发任务，但公平 Chunk 调度仍属于后续增强。
+cget 当前仍是前台运行模型，没有后台 daemon，也没有跨进程实时控制运行中的任务。`cget stats` 通过读取运行时快照工作，不是远程控制 API。

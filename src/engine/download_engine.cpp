@@ -58,43 +58,53 @@ void rememberMetadata(DownloadTask& task, const RemoteFileInfo& info) {
     }
 }
 
-}  // namespace
-
-struct DownloadEngine::RateLimiter {
-    explicit RateLimiter(std::uint64_t bytesPerSecond)
-        : bytesPerSecond(bytesPerSecond), started(std::chrono::steady_clock::now()) {}
-
-    void throttle(std::uint64_t bytes) {
-        if (bytesPerSecond == 0 || bytes == 0) {
-            return;
-        }
-        std::unique_lock lock(mutex);
-        bytesSeen += bytes;
-        const auto expected = std::chrono::duration<double>(static_cast<double>(bytesSeen) / bytesPerSecond);
-        const auto elapsed = std::chrono::steady_clock::now() - started;
-        if (expected > elapsed) {
-            std::this_thread::sleep_for(expected - elapsed);
-        }
+std::optional<std::uint64_t> globalRateLimitFromConfig(const Config& config) {
+    if (config.rateLimit.globalBytesPerSec) {
+        return config.rateLimit.globalBytesPerSec;
     }
+    if (config.download.maxDownloadRateBytesPerSec != 0) {
+        return config.download.maxDownloadRateBytesPerSec;
+    }
+    return std::nullopt;
+}
 
-    std::uint64_t bytesPerSecond = 0;
-    std::uint64_t bytesSeen = 0;
-    std::chrono::steady_clock::time_point started;
-    std::mutex mutex;
-};
+SchedulerSnapshot singleTaskSchedulerSnapshot(const Config& config) {
+    SchedulerSnapshot snapshot;
+    snapshot.totalWorkers = std::max<std::uint32_t>(1, config.scheduler.maxGlobalWorkers);
+    snapshot.maxChunksPerTask = std::max<std::uint32_t>(1, config.scheduler.maxChunksPerTask);
+    snapshot.policy = toString(config.scheduler.policy);
+    return snapshot;
+}
+
+}  // namespace
 
 DownloadEngine::DownloadEngine(std::unique_ptr<ProtocolHandler> protocol,
                                FileSystemService fileSystem,
                                PersistenceStore persistence,
                                Config config)
+    : DownloadEngine(std::move(protocol),
+                     std::move(fileSystem),
+                     std::move(persistence),
+                     config,
+                     std::make_shared<RateLimiter>(globalRateLimitFromConfig(config))) {}
+
+DownloadEngine::DownloadEngine(std::unique_ptr<ProtocolHandler> protocol,
+                               FileSystemService fileSystem,
+                               PersistenceStore persistence,
+                               Config config,
+                               std::shared_ptr<RateLimiter> rateLimiter)
     : protocol_(std::move(protocol)),
       fileSystem_(std::move(fileSystem)),
       persistence_(std::move(persistence)),
       config_(config),
-      logger_(fileSystem_, loggerOptionsFromConfig(config)) {}
+      logger_(fileSystem_, loggerOptionsFromConfig(config)),
+      metrics_(fileSystem_),
+      rateLimiter_(std::move(rateLimiter)),
+      lastMetricsFlush_() {}
 
 void DownloadEngine::download(DownloadTask& task) {
     try {
+        applyTaskRateLimit(task);
         {
             std::lock_guard lock(task.mutex);
             task.status = TaskStatus::Downloading;
@@ -130,6 +140,75 @@ void DownloadEngine::download(DownloadTask& task) {
     }
 }
 
+void DownloadEngine::prepareTask(DownloadTask& task) {
+    try {
+        applyTaskRateLimit(task);
+        {
+            std::lock_guard lock(task.mutex);
+            task.status = TaskStatus::Downloading;
+            if (!task.startedAt) {
+                task.startedAt = std::chrono::system_clock::now();
+            }
+            task.lastError.reset();
+        }
+        persistTask(task);
+
+        const auto info = protocol_->fetchMetadata(task.url);
+        if (metadataChanged(task, info)) {
+            setFailure(task, TaskStatus::MetadataMismatch, "remote file metadata changed");
+            return;
+        }
+
+        rememberMetadata(task, info);
+        if (task.fileSize > 0 && info.supportsRange && normalizedThreadCount(task) > 1) {
+            fileSystem_.ensureTaskTempDir(task.id);
+            if (task.chunks.empty()) {
+                task.chunks = ChunkPlanner::plan(task.fileSize, normalizedThreadCount(task));
+            }
+            task.downloaded.store(recomputeDownloaded(task));
+        }
+        persistTask(task);
+    } catch (const CgetError& error) {
+        setFailure(task, error.code() == ErrorCode::MetadataMismatchError ? TaskStatus::MetadataMismatch
+                                                                          : TaskStatus::Failed,
+                   error.what());
+    } catch (const std::exception& error) {
+        setFailure(task, TaskStatus::Failed, error.what());
+    }
+}
+
+void DownloadEngine::downloadPreparedChunk(DownloadTask& task, Chunk& chunk) {
+    applyTaskRateLimit(task);
+    downloadChunkWithRetry(task, chunk, *rateLimiter_);
+}
+
+void DownloadEngine::finalizePreparedTask(DownloadTask& task) {
+    if (task.status == TaskStatus::Failed || task.status == TaskStatus::MetadataMismatch ||
+        task.status == TaskStatus::Corrupted || task.status == TaskStatus::PendingRecovery) {
+        persistTask(task);
+        return;
+    }
+    const bool complete = std::all_of(task.chunks.begin(), task.chunks.end(), [](const Chunk& chunk) {
+        return chunk.status == ChunkStatus::Completed && chunk.downloaded.load() == chunk.size();
+    });
+    if (!complete) {
+        setFailure(task, TaskStatus::Failed, "not all scheduled chunks completed");
+        return;
+    }
+    fileSystem_.mergeChunks(task.chunks, task.tempDir, task.targetPath, task.fileSize);
+    if (!verifyChecksum(task)) {
+        return;
+    }
+    {
+        std::lock_guard lock(task.mutex);
+        task.downloaded.store(task.fileSize);
+        task.status = TaskStatus::Completed;
+        task.lastError.reset();
+    }
+    persistTask(task);
+    logger_.info("completed scheduled task " + task.id + " -> " + task.targetPath.string());
+}
+
 void DownloadEngine::downloadWithRange(DownloadTask& task, const RemoteFileInfo& info) {
     fileSystem_.ensureTaskTempDir(task.id);
     if (task.chunks.empty()) {
@@ -147,16 +226,15 @@ void DownloadEngine::downloadWithRange(DownloadTask& task, const RemoteFileInfo&
     std::mutex errorsMutex;
     std::vector<WorkerError> errors;
     std::vector<std::thread> workers;
-    RateLimiter limiter(config_.download.maxDownloadRateBytesPerSec);
 
     for (auto& chunk : task.chunks) {
         if (chunk.status == ChunkStatus::Completed || chunk.downloaded.load() >= chunk.size()) {
             chunk.status = ChunkStatus::Completed;
             continue;
         }
-        workers.emplace_back([this, &task, &chunk, &errors, &errorsMutex, &limiter] {
+        workers.emplace_back([this, &task, &chunk, &errors, &errorsMutex] {
             try {
-                downloadChunkWithRetry(task, chunk, limiter);
+                downloadChunkWithRetry(task, chunk, *rateLimiter_);
             } catch (const CgetError& error) {
                 std::lock_guard lock(errorsMutex);
                 errors.push_back(WorkerError{error.code(), error.what()});
@@ -236,7 +314,6 @@ void DownloadEngine::downloadSingleStream(DownloadTask& task, const RemoteFileIn
     }
 
     auto lastPersist = std::chrono::steady_clock::now();
-    RateLimiter limiter(config_.download.maxDownloadRateBytesPerSec);
     protocol_->downloadSingle(
         task.url,
         [&](const char* data, std::size_t size) {
@@ -250,7 +327,7 @@ void DownloadEngine::downloadSingleStream(DownloadTask& task, const RemoteFileIn
                 task.chunks[0].downloaded.fetch_add(bytes);
             }
             task.downloaded.fetch_add(bytes);
-            limiter.throttle(bytes);
+            rateLimiter_->acquire(task.id, bytes);
             const auto now = std::chrono::steady_clock::now();
             if (now - lastPersist >= std::chrono::milliseconds(config_.persistence.flushIntervalMs)) {
                 lastPersist = now;
@@ -334,7 +411,7 @@ void DownloadEngine::downloadChunkWithRetry(DownloadTask& task, Chunk& chunk, Ra
                 [&](std::uint64_t bytes) {
                     chunk.downloaded.fetch_add(bytes);
                     task.downloaded.fetch_add(bytes);
-                    limiter.throttle(bytes);
+                    limiter.acquire(task.id, bytes);
                     const auto now = std::chrono::steady_clock::now();
                     if (now - lastPersist >= std::chrono::milliseconds(config_.persistence.flushIntervalMs)) {
                         lastPersist = now;
@@ -378,19 +455,58 @@ void DownloadEngine::downloadChunkWithRetry(DownloadTask& task, Chunk& chunk, Ra
     }
 }
 
+void DownloadEngine::applyTaskRateLimit(const DownloadTask& task) {
+    if (!rateLimiter_) {
+        return;
+    }
+    rateLimiter_->setTaskLimit(task.id, task.taskRateLimitBytesPerSec ? task.taskRateLimitBytesPerSec
+                                                                      : config_.rateLimit.defaultPerTaskBytesPerSec);
+}
+
 void DownloadEngine::persistTask(DownloadTask& task) {
-    std::lock_guard persistLock(persistMutex_);
-    std::lock_guard taskLock(task.mutex);
-    task.updatedAt = std::chrono::system_clock::now();
-    persistence_.saveTask(task);
+    {
+        std::lock_guard persistLock(persistMutex_);
+        std::lock_guard taskLock(task.mutex);
+        task.updatedAt = std::chrono::system_clock::now();
+        persistence_.saveTask(task);
+    }
+    refreshMetrics(task);
+}
+
+void DownloadEngine::refreshMetrics(const DownloadTask& task) {
+    if (!config_.metrics.enabled) {
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    try {
+        TaskSnapshot snapshot;
+        {
+            std::lock_guard lock(task.mutex);
+            snapshot = snapshotTask(task);
+        }
+        const bool force = snapshot.status == TaskStatus::Completed || snapshot.status == TaskStatus::Failed ||
+                           snapshot.status == TaskStatus::MetadataMismatch ||
+                           snapshot.status == TaskStatus::PendingRecovery ||
+                           snapshot.status == TaskStatus::Corrupted;
+        if (!force && now - lastMetricsFlush_ < std::chrono::milliseconds(config_.metrics.sampleIntervalMs)) {
+            return;
+        }
+        lastMetricsFlush_ = now;
+        metrics_.sample({snapshot}, singleTaskSchedulerSnapshot(config_));
+        metrics_.saveRuntimeSnapshot();
+    } catch (...) {
+    }
 }
 
 void DownloadEngine::setFailure(DownloadTask& task, TaskStatus status, const std::string& message) {
-    std::lock_guard lock(task.mutex);
-    task.status = status;
-    task.lastError = message;
-    task.updatedAt = std::chrono::system_clock::now();
-    persistence_.saveTask(task);
+    {
+        std::lock_guard lock(task.mutex);
+        task.status = status;
+        task.lastError = message;
+        task.updatedAt = std::chrono::system_clock::now();
+        persistence_.saveTask(task);
+    }
+    refreshMetrics(task);
     logger_.error("task " + task.id + " failed with status " + toString(status) + ": " + message);
 }
 

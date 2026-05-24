@@ -8,15 +8,39 @@ The project follows Semantic Versioning and keeps unreleased work in the `Unrele
 
 ### Added
 
-- Added Git workflow documentation, contribution guidance, GitHub issue templates, and release automation scaffolding.
+- None.
 
 ### Changed
 
-- Centralized runtime version constants in `include/cget/version.hpp`.
+- None.
 
 ### Fixed
 
 - None.
+
+## [1.2.0] - 2026-05-24
+
+### Added
+
+- Added Scheduler module with FIFO and `small_task_first` policies, global worker limits, concurrent task limits, and per-task chunk quotas.
+- Added MetricsService and `cget stats` for lightweight runtime observability through `metrics.json`.
+- Added Token Bucket rate limiter with global and per-task limits.
+- Added `cget add --limit <LIMIT>` with `KB/MB/GB`, `KiB/MiB/GiB`, and `unlimited` parsing.
+- Added scheduler, metrics, and rate-limit configuration keys.
+- Added persisted task fields for task rate limits, scheduler quota/priority, peak speed, failed chunk count, and retry count.
+- Added unit coverage for scheduler behavior, metrics snapshots, bandwidth parsing, rate limiting, config upgrades, CLI parsing, and persistence compatibility.
+
+### Changed
+
+- Updated CLI version output to `cget 1.2.0`.
+- Updated `run` to prepare queued ranged tasks through the scheduler so large tasks cannot monopolize all chunk workers.
+- Updated `list` and `status` output to show speed, ETA, chunk, scheduler, and limit information.
+- Kept v1.1 and legacy flat config keys compatible while adding `scheduler.*`, `metrics.*`, and `rate_limit.*` groups.
+
+### Fixed
+
+- Made rate-limit config values round-trip safely when saved and reloaded.
+- Made bandwidth parsing accept human-readable `/s` suffixes.
 
 ## [1.1.0] - 2026-05-24
 

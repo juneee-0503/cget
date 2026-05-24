@@ -16,6 +16,29 @@ struct DownloadConfig {
     std::uint64_t maxDownloadRateBytesPerSec = 0;
 };
 
+enum class SchedulingPolicyType {
+    Fifo,
+    SmallTaskFirst
+};
+
+struct SchedulerConfig {
+    std::uint32_t maxGlobalWorkers = 16;
+    std::uint32_t maxConcurrentTasks = 4;
+    std::uint32_t maxChunksPerTask = 4;
+    std::uint32_t maxChunkQueueSize = 1024;
+    SchedulingPolicyType policy = SchedulingPolicyType::Fifo;
+};
+
+struct MetricsConfig {
+    bool enabled = true;
+    std::uint32_t sampleIntervalMs = 1000;
+};
+
+struct RateLimitConfig {
+    std::optional<std::uint64_t> globalBytesPerSec;
+    std::optional<std::uint64_t> defaultPerTaskBytesPerSec;
+};
+
 struct NetworkConfig {
     std::uint32_t maxRetries = 3;
     std::uint32_t retryBaseDelayMs = 1000;
@@ -35,10 +58,16 @@ struct LoggingConfig {
 
 struct Config {
     DownloadConfig download;
+    SchedulerConfig scheduler;
+    MetricsConfig metrics;
+    RateLimitConfig rateLimit;
     NetworkConfig network;
     PersistenceConfig persistence;
     LoggingConfig logging;
 };
+
+[[nodiscard]] std::string toString(SchedulingPolicyType policy);
+[[nodiscard]] SchedulingPolicyType schedulingPolicyFromString(const std::string& value);
 
 class ConfigManager {
 public:

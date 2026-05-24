@@ -7,11 +7,15 @@
 #include <random>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
 
 #include "cget/core/errors.h"
 #include "cget/crypto/sha256.h"
 #include "cget/engine/download_engine.h"
+#include "cget/metrics/metrics_service.h"
 #include "cget/network/protocol_registry.h"
+#include "cget/ratelimit/rate_limiter.h"
+#include "cget/scheduler/scheduler.h"
 
 namespace cget {
 namespace {
@@ -53,6 +57,10 @@ DownloadTask DownloadManager::createTask(const CreateTaskRequest& request) {
     task.tempDir = fileSystem_.taskTempDir(task.id);
     task.status = request.queueOnly ? TaskStatus::Queued : TaskStatus::Pending;
     task.requestedThreads = request.requestedThreads;
+    const auto loadedConfig = config_.load();
+    task.taskRateLimitBytesPerSec =
+        request.taskRateLimitOverride ? request.taskRateLimitBytesPerSec
+                                      : loadedConfig.rateLimit.defaultPerTaskBytesPerSec;
     task.createdAt = std::chrono::system_clock::now();
     task.updatedAt = task.createdAt;
 
@@ -74,8 +82,14 @@ void DownloadManager::downloadTask(DownloadTask& task) {
     task.status = TaskStatus::Queued;
     persistence_.saveTask(task);
     const auto config = config_.load();
+    auto limiter = std::make_shared<RateLimiter>(config.rateLimit.globalBytesPerSec
+                                                     ? config.rateLimit.globalBytesPerSec
+                                                     : (config.download.maxDownloadRateBytesPerSec == 0
+                                                            ? std::optional<std::uint64_t>{}
+                                                            : std::optional<std::uint64_t>{
+                                                                  config.download.maxDownloadRateBytesPerSec}));
     DownloadEngine engine(ProtocolRegistry::create(task.url, config.network.proxyUrl.value_or("")), fileSystem_,
-                          persistence_, config);
+                          persistence_, config, limiter);
     engine.download(task);
 }
 
@@ -120,30 +134,43 @@ std::vector<TaskSnapshot> DownloadManager::runQueuedTasks() {
     }
 
     const auto config = config_.load();
-    const auto workerCount =
-        std::min<std::size_t>(std::max<std::uint32_t>(1, config.download.maxActiveTasks), runnable.size());
-    std::atomic<std::size_t> next{0};
-    std::mutex resultsMutex;
-    std::vector<TaskSnapshot> results;
-    std::vector<std::thread> workers;
+    auto limiter = std::make_shared<RateLimiter>(config.rateLimit.globalBytesPerSec
+                                                     ? config.rateLimit.globalBytesPerSec
+                                                     : (config.download.maxDownloadRateBytesPerSec == 0
+                                                            ? std::optional<std::uint64_t>{}
+                                                            : std::optional<std::uint64_t>{
+                                                                  config.download.maxDownloadRateBytesPerSec}));
+    std::unordered_map<TaskId, std::unique_ptr<DownloadEngine>> engines;
+    for (auto& task : runnable) {
+        engines.emplace(task.id,
+                        std::make_unique<DownloadEngine>(
+                            ProtocolRegistry::create(task.url, config.network.proxyUrl.value_or("")), fileSystem_,
+                            persistence_, config, limiter));
+        engines.at(task.id)->prepareTask(task);
+    }
 
-    for (std::size_t i = 0; i < workerCount; ++i) {
-        workers.emplace_back([this, &runnable, &next, &results, &resultsMutex] {
-            while (true) {
-                const auto index = next.fetch_add(1);
-                if (index >= runnable.size()) {
-                    return;
-                }
-                auto& task = runnable[index];
-                downloadTask(task);
-                std::lock_guard lock(resultsMutex);
-                results.push_back(snapshotTask(task));
-            }
-        });
+    Scheduler scheduler(config.scheduler);
+    scheduler.run(runnable, [&](DownloadTask& task, Chunk& chunk) {
+        engines.at(task.id)->downloadPreparedChunk(task, chunk);
+    });
+
+    std::vector<TaskSnapshot> results;
+    results.reserve(runnable.size());
+    for (auto& task : runnable) {
+        if (task.chunks.empty() && task.status != TaskStatus::Failed && task.status != TaskStatus::MetadataMismatch) {
+            engines.at(task.id)->download(task);
+        } else if (!task.chunks.empty()) {
+            engines.at(task.id)->finalizePreparedTask(task);
+        }
+        results.push_back(snapshotTask(task));
     }
-    for (auto& worker : workers) {
-        worker.join();
+
+    if (config.metrics.enabled) {
+        MetricsService metrics(fileSystem_);
+        metrics.sample(results, scheduler.snapshot());
+        metrics.saveRuntimeSnapshot();
     }
+
     logger_.info("run completed " + std::to_string(results.size()) + " queued task(s)");
     return results;
 }

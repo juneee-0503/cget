@@ -1,12 +1,15 @@
 #include <cassert>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 
 #include "cget/cli/cli_parser.h"
@@ -19,9 +22,13 @@
 #include "cget/crypto/sha256.h"
 #include "cget/engine/download_engine.h"
 #include "cget/filesystem/filesystem_service.h"
+#include "cget/metrics/metrics_service.h"
 #include "cget/network/protocol_handler.h"
 #include "cget/network/protocol_registry.h"
 #include "cget/persistence/persistence_store.h"
+#include "cget/ratelimit/bandwidth.h"
+#include "cget/ratelimit/rate_limiter.h"
+#include "cget/scheduler/scheduler.h"
 
 namespace {
 
@@ -53,18 +60,21 @@ void unsetEnv(const char* key) {
 #endif
 }
 
+cget::DownloadTask makeTask(const cget::FileSystemService& fs);
+
 void testCliParser() {
     cget::CliParser parser;
     {
         char* argv[] = {mutableArg("cget"), mutableArg("add"), mutableArg("https://example.com/file.bin"),
                         mutableArg("-o"), mutableArg("out.bin"), mutableArg("--threads"), mutableArg("4"),
-                        mutableArg("--queue")};
-        auto command = parser.parse(8, argv);
+                        mutableArg("--queue"), mutableArg("--limit"), mutableArg("5MB")};
+        auto command = parser.parse(10, argv);
         assert(command.type == cget::CommandType::Add);
         assert(command.args.at(0) == "https://example.com/file.bin");
         assert(command.options.at("output") == "out.bin");
         assert(command.options.at("threads") == "4");
         assert(command.options.at("queue") == "true");
+        assert(command.options.at("limit") == "5MB");
     }
     {
         char* argv[] = {mutableArg("cget"), mutableArg("add")};
@@ -97,6 +107,11 @@ void testCliParser() {
         char* argv[] = {mutableArg("cget"), mutableArg("run")};
         auto command = parser.parse(2, argv);
         assert(command.type == cget::CommandType::Run);
+    }
+    {
+        char* argv[] = {mutableArg("cget"), mutableArg("stats")};
+        auto command = parser.parse(2, argv);
+        assert(command.type == cget::CommandType::Stats);
     }
     {
         char* argv[] = {mutableArg("cget"), mutableArg("config"), mutableArg("set"), mutableArg("max_threads"),
@@ -179,15 +194,28 @@ void testConfigManager() {
     assert(manager.get("max_threads") == "4");
     assert(manager.get("download.max_active_tasks") == "3");
     manager.set("download.max_download_rate_bytes_per_sec", "0");
+    manager.set("scheduler.max_global_workers", "12");
+    manager.set("scheduler.max_chunks_per_task", "3");
+    manager.set("scheduler.policy", "small_task_first");
+    manager.set("metrics.enabled", "true");
+    manager.set("metrics.sample_interval_ms", "250");
+    manager.set("rate_limit.global", "20MB");
+    manager.set("rate_limit.default_per_task", "unlimited");
     manager.set("network.proxy", "http://127.0.0.1:9999");
     manager.set("logging.level", "debug");
     manager.set("logging.console", "false");
     assert(manager.get("max_download_rate_bytes_per_sec") == "0");
+    assert(manager.get("scheduler.max_global_workers") == "12");
+    assert(manager.get("scheduler.max_chunks_per_task") == "3");
+    assert(manager.get("scheduler.policy") == "small_task_first");
+    assert(manager.get("metrics.sample_interval_ms") == "250");
+    assert(manager.get("rate_limit.global") == "19.07MB/s" || manager.get("rate_limit.global") == "20.00MB/s");
+    assert(manager.get("rate_limit.default_per_task") == "unlimited");
     assert(manager.get("proxy") == "http://127.0.0.1:9999");
     assert(manager.get("logging.level") == "debug");
     manager.set("proxy", "none");
     assert(manager.get("network.proxy") == "none");
-    assert(manager.entries().size() == 11);
+    assert(manager.entries().size() >= 20);
 
     bool threw = false;
     try {
@@ -220,15 +248,21 @@ void testConfigManager() {
 
     {
         setEnv("CGET_MAX_THREADS", "6");
+        setEnv("CGET_MAX_GLOBAL_WORKERS", "10");
+        setEnv("CGET_GLOBAL_RATE_LIMIT", "1MiB");
         setEnv("CGET_LOG_LEVEL", "warn");
         setEnv("CGET_PROXY", "none");
         cget::FileSystemService envFs(makeTempHome("config_env"));
         cget::ConfigManager envManager(envFs);
         const auto loaded = envManager.load();
         assert(loaded.download.maxThreads == 6);
+        assert(loaded.scheduler.maxGlobalWorkers == 10);
+        assert(loaded.rateLimit.globalBytesPerSec == 1024 * 1024);
         assert(loaded.logging.level == "warn");
         assert(!loaded.network.proxyUrl.has_value());
         unsetEnv("CGET_MAX_THREADS");
+        unsetEnv("CGET_MAX_GLOBAL_WORKERS");
+        unsetEnv("CGET_GLOBAL_RATE_LIMIT");
         unsetEnv("CGET_LOG_LEVEL");
         unsetEnv("CGET_PROXY");
     }
@@ -279,6 +313,84 @@ void testProtocolRegistry() {
         auto ftpHandler = cget::ProtocolRegistry::create("ftp://example.com/file", "");
         assert(ftpHandler != nullptr);
     }
+}
+
+void testBandwidthAndRateLimiter() {
+    assert(cget::parseBandwidthLimit("unlimited") == std::nullopt);
+    assert(cget::parseBandwidthLimit("1KiB") == 1024);
+    assert(cget::parseBandwidthLimit("2MB") == 2'000'000);
+    assert(cget::formatRateLimit(std::nullopt) == "unlimited");
+
+    cget::RateLimiter limiter(std::nullopt);
+    const auto fastStart = std::chrono::steady_clock::now();
+    limiter.acquire("task", 1024);
+    assert(std::chrono::steady_clock::now() - fastStart < std::chrono::milliseconds(50));
+
+    cget::RateLimiter limited(1024);
+    const auto slowStart = std::chrono::steady_clock::now();
+    limited.acquire("task", 2048);
+    assert(std::chrono::steady_clock::now() - slowStart >= std::chrono::milliseconds(800));
+}
+
+void testScheduler() {
+    cget::FileSystemService fs(makeTempHome("scheduler"));
+    std::vector<cget::DownloadTask> tasks;
+    auto first = makeTask(fs);
+    first.id = "first";
+    first.status = cget::TaskStatus::Queued;
+    first.chunks.clear();
+    first.chunks.emplace_back(0, 0, 4, 0, cget::ChunkStatus::Pending, 0, "chunk_0.part");
+    first.chunks.emplace_back(1, 5, 9, 0, cget::ChunkStatus::Pending, 0, "chunk_1.part");
+    auto second = first;
+    second.id = "second";
+    second.fileSize = 4;
+    second.chunks.clear();
+    second.chunks.emplace_back(0, 0, 3, 0, cget::ChunkStatus::Pending, 0, "chunk_0.part");
+    tasks.push_back(std::move(first));
+    tasks.push_back(std::move(second));
+
+    cget::SchedulerConfig config;
+    config.maxGlobalWorkers = 2;
+    config.maxConcurrentTasks = 2;
+    config.maxChunksPerTask = 1;
+    cget::Scheduler scheduler(config);
+    scheduler.run(tasks, [](cget::DownloadTask& task, cget::Chunk& chunk) {
+        const auto size = chunk.size();
+        {
+            std::lock_guard lock(task.mutex);
+            chunk.downloaded.store(size);
+            chunk.status = cget::ChunkStatus::Completed;
+            task.downloaded.fetch_add(size);
+        }
+    });
+
+    assert(tasks[0].chunks[0].status == cget::ChunkStatus::Completed);
+    assert(tasks[0].chunks[1].status == cget::ChunkStatus::Completed);
+    assert(tasks[1].chunks[0].status == cget::ChunkStatus::Completed);
+    assert(!scheduler.scheduledJobs().empty());
+    assert(scheduler.snapshot().busyWorkers == 0);
+}
+
+void testMetricsService() {
+    cget::FileSystemService fs(makeTempHome("metrics"));
+    cget::MetricsService metrics(fs);
+    cget::DownloadTask task = makeTask(fs);
+    const auto snapshot = cget::snapshotTask(task);
+    cget::SchedulerSnapshot scheduler;
+    scheduler.totalWorkers = 4;
+    scheduler.busyWorkers = 2;
+    scheduler.workerUtilization = 50.0;
+    scheduler.policy = "fifo";
+    metrics.sample({snapshot}, scheduler);
+    const auto system = metrics.getSystemMetrics();
+    assert(system.totalTasks == 1);
+    assert(system.totalWorkers == 4);
+    assert(system.busyWorkers == 2);
+    assert(system.globalAverageSpeedBytesPerSec > 0.0);
+    metrics.saveRuntimeSnapshot();
+    const auto loaded = cget::MetricsService::loadRuntimeSnapshot(fs);
+    assert(loaded.has_value());
+    assert(loaded->totalTasks == 1);
 }
 
 cget::DownloadTask makeTask(const cget::FileSystemService& fs) {
@@ -482,11 +594,23 @@ void testPersistenceAndRecovery() {
     task.remoteEtag = "\"etag\"";
     task.remoteLastModified = "Sun, 24 May 2026 00:00:00 GMT";
     task.finalUrl = "https://example.com/file.bin";
+    task.taskRateLimitBytesPerSec = 512 * 1024;
+    task.schedulerMaxChunks = 2;
+    task.schedulerPriority = 1;
+    task.peakSpeedBytesPerSec = 1234.0;
+    task.failedChunks = 1;
+    task.persistedRetryCount = 2;
     store.saveTask(task);
     loaded = store.loadTask("task1");
     assert(loaded.remoteEtag == "\"etag\"");
     assert(loaded.remoteLastModified == "Sun, 24 May 2026 00:00:00 GMT");
     assert(loaded.finalUrl == "https://example.com/file.bin");
+    assert(loaded.taskRateLimitBytesPerSec == 512 * 1024);
+    assert(loaded.schedulerMaxChunks == 2);
+    assert(loaded.schedulerPriority == 1);
+    assert(loaded.peakSpeedBytesPerSec == 1234.0);
+    assert(loaded.failedChunks == 1);
+    assert(loaded.persistedRetryCount == 2);
 
     task.lastError = "create backup";
     store.saveTask(task);
@@ -548,6 +672,9 @@ int main() {
     testLogger();
     testSha256();
     testProtocolRegistry();
+    testBandwidthAndRateLimiter();
+    testScheduler();
+    testMetricsService();
     testFileSystemPaths();
     testConfigManager();
     testPersistenceAndRecovery();

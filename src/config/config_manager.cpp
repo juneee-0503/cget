@@ -13,6 +13,7 @@
 #include "cget/core/errors.h"
 #include "cget/core/logger.h"
 #include "cget/persistence/json.h"
+#include "cget/ratelimit/bandwidth.h"
 
 namespace cget {
 namespace {
@@ -29,6 +30,32 @@ json::Value::Object downloadToJson(const DownloadConfig& config) {
     out["max_threads"] = json::Value(static_cast<std::uint64_t>(config.maxThreads));
     out["max_active_tasks"] = json::Value(static_cast<std::uint64_t>(config.maxActiveTasks));
     out["max_download_rate_bytes_per_sec"] = json::Value(config.maxDownloadRateBytesPerSec);
+    return out;
+}
+
+json::Value::Object schedulerToJson(const SchedulerConfig& config) {
+    json::Value::Object out;
+    out["max_global_workers"] = json::Value(static_cast<std::uint64_t>(config.maxGlobalWorkers));
+    out["max_concurrent_tasks"] = json::Value(static_cast<std::uint64_t>(config.maxConcurrentTasks));
+    out["max_chunks_per_task"] = json::Value(static_cast<std::uint64_t>(config.maxChunksPerTask));
+    out["max_chunk_queue_size"] = json::Value(static_cast<std::uint64_t>(config.maxChunkQueueSize));
+    out["policy"] = json::Value(toString(config.policy));
+    return out;
+}
+
+json::Value::Object metricsToJson(const MetricsConfig& config) {
+    json::Value::Object out;
+    out["enabled"] = json::Value(config.enabled);
+    out["sample_interval_ms"] = json::Value(static_cast<std::uint64_t>(config.sampleIntervalMs));
+    return out;
+}
+
+json::Value::Object rateLimitToJson(const RateLimitConfig& config) {
+    json::Value::Object out;
+    out["global"] = json::Value(config.globalBytesPerSec ? std::to_string(*config.globalBytesPerSec) : "unlimited");
+    out["default_per_task"] =
+        json::Value(config.defaultPerTaskBytesPerSec ? std::to_string(*config.defaultPerTaskBytesPerSec)
+                                                     : "unlimited");
     return out;
 }
 
@@ -58,6 +85,9 @@ json::Value::Object loggingToJson(const LoggingConfig& config) {
 json::Value::Object toJson(const Config& config) {
     json::Value::Object out;
     out["download"] = json::Value(downloadToJson(config.download));
+    out["scheduler"] = json::Value(schedulerToJson(config.scheduler));
+    out["metrics"] = json::Value(metricsToJson(config.metrics));
+    out["rate_limit"] = json::Value(rateLimitToJson(config.rateLimit));
     out["network"] = json::Value(networkToJson(config.network));
     out["persistence"] = json::Value(persistenceToJson(config.persistence));
     out["logging"] = json::Value(loggingToJson(config.logging));
@@ -118,6 +148,17 @@ std::string canonicalKeyName(const std::string& key) {
     if (key == "max_active_tasks" || key == "download.max_active_tasks") return "download.max_active_tasks";
     if (key == "max_download_rate_bytes_per_sec" || key == "download.max_download_rate_bytes_per_sec") {
         return "download.max_download_rate_bytes_per_sec";
+    }
+    if (key == "scheduler.max_global_workers") return "scheduler.max_global_workers";
+    if (key == "scheduler.max_concurrent_tasks") return "scheduler.max_concurrent_tasks";
+    if (key == "scheduler.max_chunks_per_task") return "scheduler.max_chunks_per_task";
+    if (key == "scheduler.max_chunk_queue_size") return "scheduler.max_chunk_queue_size";
+    if (key == "scheduler.policy") return "scheduler.policy";
+    if (key == "metrics.enabled") return "metrics.enabled";
+    if (key == "metrics.sample_interval_ms") return "metrics.sample_interval_ms";
+    if (key == "global_rate_limit" || key == "rate_limit.global") return "rate_limit.global";
+    if (key == "task_default_rate_limit" || key == "rate_limit.default_per_task") {
+        return "rate_limit.default_per_task";
     }
     if (key == "max_retries" || key == "network.max_retries") return "network.max_retries";
     if (key == "retry_base_delay_ms" || key == "network.retry_base_delay_ms") {
@@ -181,6 +222,31 @@ void applyNestedConfig(const json::Value& root, Config& config) {
         readUint32(download, "max_active_tasks", config.download.maxActiveTasks);
         readUint64(download, "max_download_rate_bytes_per_sec", config.download.maxDownloadRateBytesPerSec);
     }
+    if (root.contains("scheduler") && root.at("scheduler").isObject()) {
+        const auto& scheduler = root.at("scheduler");
+        readUint32(scheduler, "max_global_workers", config.scheduler.maxGlobalWorkers);
+        readUint32(scheduler, "max_concurrent_tasks", config.scheduler.maxConcurrentTasks);
+        readUint32(scheduler, "max_chunks_per_task", config.scheduler.maxChunksPerTask);
+        readUint32(scheduler, "max_chunk_queue_size", config.scheduler.maxChunkQueueSize);
+        if (scheduler.contains("policy") && !scheduler.at("policy").isNull()) {
+            config.scheduler.policy = schedulingPolicyFromString(scheduler.at("policy").asString());
+        }
+    }
+    if (root.contains("metrics") && root.at("metrics").isObject()) {
+        const auto& metrics = root.at("metrics");
+        readBool(metrics, "enabled", config.metrics.enabled);
+        readUint32(metrics, "sample_interval_ms", config.metrics.sampleIntervalMs);
+    }
+    if (root.contains("rate_limit") && root.at("rate_limit").isObject()) {
+        const auto& rateLimit = root.at("rate_limit");
+        if (rateLimit.contains("global") && !rateLimit.at("global").isNull()) {
+            config.rateLimit.globalBytesPerSec = parseBandwidthLimit(rateLimit.at("global").asString());
+        }
+        if (rateLimit.contains("default_per_task") && !rateLimit.at("default_per_task").isNull()) {
+            config.rateLimit.defaultPerTaskBytesPerSec =
+                parseBandwidthLimit(rateLimit.at("default_per_task").asString());
+        }
+    }
     if (root.contains("network") && root.at("network").isObject()) {
         const auto& network = root.at("network");
         readUint32(network, "max_retries", config.network.maxRetries);
@@ -232,6 +298,18 @@ void applyEnv(Config& config) {
         config.download.maxDownloadRateBytesPerSec =
             parseUint64Local("CGET_MAX_DOWNLOAD_RATE_BYTES_PER_SEC", value);
     }
+    if (const char* value = std::getenv("CGET_MAX_GLOBAL_WORKERS")) {
+        config.scheduler.maxGlobalWorkers = parsePositiveUintLocal("CGET_MAX_GLOBAL_WORKERS", value);
+    }
+    if (const char* value = std::getenv("CGET_MAX_CHUNKS_PER_TASK")) {
+        config.scheduler.maxChunksPerTask = parsePositiveUintLocal("CGET_MAX_CHUNKS_PER_TASK", value);
+    }
+    if (const char* value = std::getenv("CGET_GLOBAL_RATE_LIMIT")) {
+        config.rateLimit.globalBytesPerSec = parseBandwidthLimit(value);
+    }
+    if (const char* value = std::getenv("CGET_TASK_DEFAULT_RATE_LIMIT")) {
+        config.rateLimit.defaultPerTaskBytesPerSec = parseBandwidthLimit(value);
+    }
     if (const char* value = std::getenv("CGET_PROXY")) {
         if (*value == '\0' || std::string(value) == "none") {
             config.network.proxyUrl.reset();
@@ -256,6 +334,16 @@ void normalize(Config& config) {
     config.download.maxThreads = std::max<std::uint32_t>(1, std::min<std::uint32_t>(config.download.maxThreads, 32));
     config.download.maxActiveTasks =
         std::max<std::uint32_t>(1, std::min<std::uint32_t>(config.download.maxActiveTasks, 16));
+    config.scheduler.maxGlobalWorkers =
+        std::max<std::uint32_t>(1, std::min<std::uint32_t>(config.scheduler.maxGlobalWorkers, 128));
+    config.scheduler.maxConcurrentTasks =
+        std::max<std::uint32_t>(1, std::min<std::uint32_t>(config.scheduler.maxConcurrentTasks, 64));
+    config.scheduler.maxChunksPerTask =
+        std::max<std::uint32_t>(1, std::min<std::uint32_t>(config.scheduler.maxChunksPerTask, 64));
+    config.scheduler.maxChunkQueueSize =
+        std::max<std::uint32_t>(1, std::min<std::uint32_t>(config.scheduler.maxChunkQueueSize, 65536));
+    config.metrics.sampleIntervalMs =
+        std::max<std::uint32_t>(100, std::min<std::uint32_t>(config.metrics.sampleIntervalMs, 60000));
     config.network.maxRetries = std::min<std::uint32_t>(config.network.maxRetries, 10);
     config.network.retryBaseDelayMs =
         std::max<std::uint32_t>(100, std::min<std::uint32_t>(config.network.retryBaseDelayMs, 60000));
@@ -272,6 +360,17 @@ std::string valueForKey(const Config& config, const std::string& key) {
     if (canonical == "download.max_download_rate_bytes_per_sec") {
         return std::to_string(config.download.maxDownloadRateBytesPerSec);
     }
+    if (canonical == "scheduler.max_global_workers") return std::to_string(config.scheduler.maxGlobalWorkers);
+    if (canonical == "scheduler.max_concurrent_tasks") return std::to_string(config.scheduler.maxConcurrentTasks);
+    if (canonical == "scheduler.max_chunks_per_task") return std::to_string(config.scheduler.maxChunksPerTask);
+    if (canonical == "scheduler.max_chunk_queue_size") return std::to_string(config.scheduler.maxChunkQueueSize);
+    if (canonical == "scheduler.policy") return toString(config.scheduler.policy);
+    if (canonical == "metrics.enabled") return config.metrics.enabled ? "true" : "false";
+    if (canonical == "metrics.sample_interval_ms") return std::to_string(config.metrics.sampleIntervalMs);
+    if (canonical == "rate_limit.global") return formatRateLimit(config.rateLimit.globalBytesPerSec);
+    if (canonical == "rate_limit.default_per_task") {
+        return formatRateLimit(config.rateLimit.defaultPerTaskBytesPerSec);
+    }
     if (canonical == "network.max_retries") return std::to_string(config.network.maxRetries);
     if (canonical == "network.retry_base_delay_ms") return std::to_string(config.network.retryBaseDelayMs);
     if (canonical == "network.proxy") return config.network.proxyUrl.value_or("none");
@@ -284,6 +383,26 @@ std::string valueForKey(const Config& config, const std::string& key) {
 }
 
 }  // namespace
+
+std::string toString(SchedulingPolicyType policy) {
+    switch (policy) {
+        case SchedulingPolicyType::Fifo: return "fifo";
+        case SchedulingPolicyType::SmallTaskFirst: return "small_task_first";
+    }
+    return "fifo";
+}
+
+SchedulingPolicyType schedulingPolicyFromString(const std::string& value) {
+    const auto normalized = lower(value);
+    if (normalized == "fifo") {
+        return SchedulingPolicyType::Fifo;
+    }
+    if (normalized == "small_task_first" || normalized == "small-task-first") {
+        return SchedulingPolicyType::SmallTaskFirst;
+    }
+    throw CgetError(ErrorCode::InvalidCommandError,
+                   "scheduler.policy must be fifo or small_task_first");
+}
 
 ConfigManager::ConfigManager(FileSystemService fileSystem) : fileSystem_(std::move(fileSystem)) {}
 
@@ -358,6 +477,28 @@ void ConfigManager::set(const std::string& key, const std::string& value) const 
         config.download.maxActiveTasks = parsed;
     } else if (canonical == "download.max_download_rate_bytes_per_sec") {
         config.download.maxDownloadRateBytesPerSec = parseUint64(key, value);
+    } else if (canonical == "scheduler.max_global_workers") {
+        config.scheduler.maxGlobalWorkers = parsePositiveUint(key, value);
+    } else if (canonical == "scheduler.max_concurrent_tasks") {
+        config.scheduler.maxConcurrentTasks = parsePositiveUint(key, value);
+    } else if (canonical == "scheduler.max_chunks_per_task") {
+        config.scheduler.maxChunksPerTask = parsePositiveUint(key, value);
+    } else if (canonical == "scheduler.max_chunk_queue_size") {
+        config.scheduler.maxChunkQueueSize = parsePositiveUint(key, value);
+    } else if (canonical == "scheduler.policy") {
+        config.scheduler.policy = schedulingPolicyFromString(value);
+    } else if (canonical == "metrics.enabled") {
+        config.metrics.enabled = parseBool(key, value);
+    } else if (canonical == "metrics.sample_interval_ms") {
+        const auto parsed = parsePositiveUint(key, value);
+        if (parsed < 100 || parsed > 60000) {
+            throw CgetError(ErrorCode::InvalidCommandError, "metrics.sample_interval_ms must be between 100 and 60000");
+        }
+        config.metrics.sampleIntervalMs = parsed;
+    } else if (canonical == "rate_limit.global") {
+        config.rateLimit.globalBytesPerSec = parseBandwidthLimit(value);
+    } else if (canonical == "rate_limit.default_per_task") {
+        config.rateLimit.defaultPerTaskBytesPerSec = parseBandwidthLimit(value);
     } else if (canonical == "network.max_retries") {
         const auto parsed = parsePositiveUint(key, value);
         if (parsed > 10) {
@@ -412,6 +553,15 @@ std::vector<std::pair<std::string, std::string>> ConfigManager::entries() const 
         {"download.max_threads", std::to_string(config.download.maxThreads)},
         {"download.max_active_tasks", std::to_string(config.download.maxActiveTasks)},
         {"download.max_download_rate_bytes_per_sec", std::to_string(config.download.maxDownloadRateBytesPerSec)},
+        {"scheduler.max_global_workers", std::to_string(config.scheduler.maxGlobalWorkers)},
+        {"scheduler.max_concurrent_tasks", std::to_string(config.scheduler.maxConcurrentTasks)},
+        {"scheduler.max_chunks_per_task", std::to_string(config.scheduler.maxChunksPerTask)},
+        {"scheduler.max_chunk_queue_size", std::to_string(config.scheduler.maxChunkQueueSize)},
+        {"scheduler.policy", toString(config.scheduler.policy)},
+        {"metrics.enabled", config.metrics.enabled ? "true" : "false"},
+        {"metrics.sample_interval_ms", std::to_string(config.metrics.sampleIntervalMs)},
+        {"rate_limit.global", formatRateLimit(config.rateLimit.globalBytesPerSec)},
+        {"rate_limit.default_per_task", formatRateLimit(config.rateLimit.defaultPerTaskBytesPerSec)},
         {"network.max_retries", std::to_string(config.network.maxRetries)},
         {"network.retry_base_delay_ms", std::to_string(config.network.retryBaseDelayMs)},
         {"network.proxy", config.network.proxyUrl.value_or("none")},

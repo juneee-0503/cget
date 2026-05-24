@@ -181,6 +181,24 @@ DownloadTask PersistenceStore::taskFromJson(const std::string& text) const {
         if (root.contains("final_url") && !root.at("final_url").isNull()) {
             task.finalUrl = root.at("final_url").asString();
         }
+        if (root.contains("task_rate_limit_bytes_per_sec") && !root.at("task_rate_limit_bytes_per_sec").isNull()) {
+            task.taskRateLimitBytesPerSec = root.at("task_rate_limit_bytes_per_sec").asUint64();
+        }
+        if (root.contains("scheduler_max_chunks")) {
+            task.schedulerMaxChunks = asUint32(root.at("scheduler_max_chunks"));
+        }
+        if (root.contains("scheduler_priority")) {
+            task.schedulerPriority = asUint32(root.at("scheduler_priority"));
+        }
+        if (root.contains("peak_speed_bytes_per_sec")) {
+            task.peakSpeedBytesPerSec = root.at("peak_speed_bytes_per_sec").asNumber();
+        }
+        if (root.contains("failed_chunk_count")) {
+            task.failedChunks = asUint32(root.at("failed_chunk_count"));
+        }
+        if (root.contains("retry_count")) {
+            task.persistedRetryCount = asUint32(root.at("retry_count"));
+        }
         if (root.contains("requested_threads")) {
             task.requestedThreads = asUint32(root.at("requested_threads"));
         }
@@ -232,6 +250,13 @@ std::string PersistenceStore::taskToJson(const DownloadTask& task) const {
     root["remote_last_modified"] =
         task.remoteLastModified ? json::Value(*task.remoteLastModified) : json::Value(nullptr);
     root["final_url"] = task.finalUrl ? json::Value(*task.finalUrl) : json::Value(nullptr);
+    root["task_rate_limit_bytes_per_sec"] =
+        task.taskRateLimitBytesPerSec ? json::Value(*task.taskRateLimitBytesPerSec) : json::Value(nullptr);
+    root["scheduler_max_chunks"] = json::Value(static_cast<std::uint64_t>(task.schedulerMaxChunks));
+    root["scheduler_priority"] = json::Value(static_cast<std::uint64_t>(task.schedulerPriority));
+    root["peak_speed_bytes_per_sec"] = json::Value(task.peakSpeedBytesPerSec);
+    root["failed_chunk_count"] = json::Value(static_cast<std::uint64_t>(task.failedChunks));
+    root["retry_count"] = json::Value(static_cast<std::uint64_t>(task.persistedRetryCount));
     root["chunks"] = json::Value(std::move(chunks));
     return json::stringify(json::Value(std::move(root)));
 }

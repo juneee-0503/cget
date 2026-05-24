@@ -63,6 +63,12 @@ Command CliParser::parse(int argc, char** argv) const {
         }
         return Command{CommandType::List, {}, {}};
     }
+    if (tokens[0] == "stats") {
+        if (tokens.size() != 1) {
+            throw CgetError(ErrorCode::InvalidCommandError, "stats does not accept positional arguments");
+        }
+        return Command{CommandType::Stats, {}, {}};
+    }
     if (tokens[0] == "status") {
         return parseStatus(tokens);
     }
@@ -90,14 +96,15 @@ std::string CliParser::helpText() const {
            "\n"
            "\n"
            "Usage:\n"
-           "  cget add <url> [-o <path>] [--threads N]\n"
-           "  cget add <url> [--sha256 HEX] [-o <path>] [--threads N]\n"
-           "  cget add <url> --queue [--sha256 HEX] [-o <path>] [--threads N]\n"
+           "  cget add <url> [-o <path>] [--threads N] [--limit LIMIT]\n"
+           "  cget add <url> [--sha256 HEX] [-o <path>] [--threads N] [--limit LIMIT]\n"
+           "  cget add <url> --queue [--sha256 HEX] [-o <path>] [--threads N] [--limit LIMIT]\n"
            "  cget pause <task-id>\n"
            "  cget resume <task-id>\n"
            "  cget remove <task-id>\n"
            "  cget run\n"
            "  cget list\n"
+           "  cget stats\n"
            "  cget status <task-id>\n"
            "  cget config get [key]\n"
            "  cget config set <key> <value>\n"
@@ -110,6 +117,10 @@ std::string CliParser::helpText() const {
            "  download.max_threads, max_threads\n"
            "  download.max_active_tasks, max_active_tasks\n"
            "  download.max_download_rate_bytes_per_sec, max_download_rate_bytes_per_sec\n"
+           "  scheduler.max_global_workers, scheduler.max_concurrent_tasks\n"
+           "  scheduler.max_chunks_per_task, scheduler.max_chunk_queue_size, scheduler.policy\n"
+           "  metrics.enabled, metrics.sample_interval_ms\n"
+           "  rate_limit.global, rate_limit.default_per_task\n"
            "  network.max_retries, max_retries\n"
            "  network.retry_base_delay_ms, retry_base_delay_ms\n"
            "  network.proxy, proxy\n"
@@ -120,6 +131,8 @@ std::string CliParser::helpText() const {
            "  CGET_HOME  Override the default ~/.cget state directory.\n"
            "  CGET_MAX_THREADS, CGET_MAX_ACTIVE_TASKS, CGET_MAX_RETRIES\n"
            "  CGET_RETRY_BASE_DELAY_MS, CGET_MAX_DOWNLOAD_RATE_BYTES_PER_SEC\n"
+           "  CGET_MAX_GLOBAL_WORKERS, CGET_MAX_CHUNKS_PER_TASK\n"
+           "  CGET_GLOBAL_RATE_LIMIT, CGET_TASK_DEFAULT_RATE_LIMIT\n"
            "  CGET_PROXY, CGET_LOG_LEVEL, CGET_LOG_CONSOLE\n";
 }
 
@@ -157,6 +170,13 @@ Command CliParser::parseAdd(const std::vector<std::string>& tokens) const {
                 throw CgetError(ErrorCode::InvalidCommandError, "--sha256 requires a 64-character hex digest");
             }
             command.options["sha256"] = tokens[++i];
+            continue;
+        }
+        if (tokens[i] == "--limit") {
+            if (i + 1 >= tokens.size()) {
+                throw CgetError(ErrorCode::InvalidCommandError, "--limit requires a bandwidth value");
+            }
+            command.options["limit"] = tokens[++i];
             continue;
         }
         if (tokens[i] == "--force") {
