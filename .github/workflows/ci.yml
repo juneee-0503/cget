@@ -21,13 +21,23 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
 
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCGET_BUILD_STRESS_TESTS=ON
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCGET_WARNINGS_AS_ERRORS=ON -DCGET_BUILD_STRESS_TESTS=ON
 
       - name: Build
         run: cmake --build build --parallel
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  release-build:
+    name: Release build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+      - run: cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DCGET_WARNINGS_AS_ERRORS=ON
+      - run: cmake --build build-release --parallel
+      - run: ./build-release/cget version
 
   asan:
     name: ASAN
@@ -38,3 +48,14 @@ jobs:
       - run: cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DCGET_ENABLE_ASAN=ON
       - run: cmake --build build-asan --parallel
       - run: ctest --test-dir build-asan --output-on-failure
+
+  tsan:
+    name: TSAN
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+      - run: cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DCGET_ENABLE_TSAN=ON
+      - run: cmake --build build-tsan --parallel
+      - run: ctest --test-dir build-tsan --output-on-failure

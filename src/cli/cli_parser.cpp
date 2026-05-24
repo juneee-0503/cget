@@ -4,6 +4,7 @@
 #include <sstream>
 
 #include "cget/core/errors.h"
+#include "cget/version.hpp"
 
 namespace cget {
 namespace {
@@ -85,7 +86,8 @@ Command CliParser::parse(int argc, char** argv) const {
 }
 
 std::string CliParser::helpText() const {
-    return "cget 1.0\n"
+    return std::string("cget ") + CGET_VERSION_SHORT +
+           "\n"
            "\n"
            "Usage:\n"
            "  cget add <url> [-o <path>] [--threads N]\n"
@@ -104,12 +106,25 @@ std::string CliParser::helpText() const {
            "  cget version\n"
            "  cget help\n"
            "\n"
+           "Config keys:\n"
+           "  download.max_threads, max_threads\n"
+           "  download.max_active_tasks, max_active_tasks\n"
+           "  download.max_download_rate_bytes_per_sec, max_download_rate_bytes_per_sec\n"
+           "  network.max_retries, max_retries\n"
+           "  network.retry_base_delay_ms, retry_base_delay_ms\n"
+           "  network.proxy, proxy\n"
+           "  persistence.flush_interval_ms\n"
+           "  logging.level, logging.console, logging.max_file_bytes, logging.max_rotated_files\n"
+           "\n"
            "Environment:\n"
-           "  CGET_HOME  Override the default ~/.cget state directory.\n";
+           "  CGET_HOME  Override the default ~/.cget state directory.\n"
+           "  CGET_MAX_THREADS, CGET_MAX_ACTIVE_TASKS, CGET_MAX_RETRIES\n"
+           "  CGET_RETRY_BASE_DELAY_MS, CGET_MAX_DOWNLOAD_RATE_BYTES_PER_SEC\n"
+           "  CGET_PROXY, CGET_LOG_LEVEL, CGET_LOG_CONSOLE\n";
 }
 
 std::string CliParser::versionText() const {
-    return "cget 1.0.0";
+    return std::string("cget ") + CGET_VERSION_STRING;
 }
 
 Command CliParser::parseAdd(const std::vector<std::string>& tokens) const {

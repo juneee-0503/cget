@@ -20,10 +20,10 @@ bool isValidTransition(TaskStatus current, TaskStatus next) {
         case TaskStatus::Downloading:
             return next == TaskStatus::Paused || next == TaskStatus::Retrying || next == TaskStatus::Failed ||
                    next == TaskStatus::Completed || next == TaskStatus::Cancelled ||
-                   next == TaskStatus::MetadataMismatch;
+                   next == TaskStatus::PendingRecovery || next == TaskStatus::MetadataMismatch;
         case TaskStatus::Retrying:
             return next == TaskStatus::Queued || next == TaskStatus::Downloading || next == TaskStatus::Failed ||
-                   next == TaskStatus::Paused;
+                   next == TaskStatus::Paused || next == TaskStatus::PendingRecovery;
         case TaskStatus::Paused:
             return next == TaskStatus::Queued || next == TaskStatus::Downloading || next == TaskStatus::Removed ||
                    next == TaskStatus::Failed;
@@ -35,6 +35,9 @@ bool isValidTransition(TaskStatus current, TaskStatus next) {
             return next == TaskStatus::Removed;
         case TaskStatus::Corrupted:
             return next == TaskStatus::Removed;
+        case TaskStatus::PendingRecovery:
+            return next == TaskStatus::Paused || next == TaskStatus::Queued || next == TaskStatus::Removed ||
+                   next == TaskStatus::MetadataMismatch || next == TaskStatus::Failed;
         case TaskStatus::MetadataMismatch:
             return next == TaskStatus::Removed || next == TaskStatus::Failed;
         case TaskStatus::Removed:

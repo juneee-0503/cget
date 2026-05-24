@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
+#include <cstdlib>
 #include <fstream>
 #include <limits>
 #include <sstream>
@@ -9,6 +11,7 @@
 #include <utility>
 
 #include "cget/core/errors.h"
+#include "cget/core/logger.h"
 #include "cget/persistence/json.h"
 
 namespace cget {
@@ -21,14 +24,43 @@ std::string readTextFile(const std::filesystem::path& path) {
     return buffer.str();
 }
 
-json::Value::Object toJson(const Config& config) {
+json::Value::Object downloadToJson(const DownloadConfig& config) {
     json::Value::Object out;
     out["max_threads"] = json::Value(static_cast<std::uint64_t>(config.maxThreads));
     out["max_active_tasks"] = json::Value(static_cast<std::uint64_t>(config.maxActiveTasks));
+    out["max_download_rate_bytes_per_sec"] = json::Value(config.maxDownloadRateBytesPerSec);
+    return out;
+}
+
+json::Value::Object networkToJson(const NetworkConfig& config) {
+    json::Value::Object out;
     out["max_retries"] = json::Value(static_cast<std::uint64_t>(config.maxRetries));
     out["retry_base_delay_ms"] = json::Value(static_cast<std::uint64_t>(config.retryBaseDelayMs));
-    out["max_download_rate_bytes_per_sec"] = json::Value(config.maxDownloadRateBytesPerSec);
-    out["proxy_url"] = config.proxyUrl ? json::Value(*config.proxyUrl) : json::Value(nullptr);
+    out["proxy"] = config.proxyUrl ? json::Value(*config.proxyUrl) : json::Value(nullptr);
+    return out;
+}
+
+json::Value::Object persistenceToJson(const PersistenceConfig& config) {
+    json::Value::Object out;
+    out["flush_interval_ms"] = json::Value(static_cast<std::uint64_t>(config.flushIntervalMs));
+    return out;
+}
+
+json::Value::Object loggingToJson(const LoggingConfig& config) {
+    json::Value::Object out;
+    out["level"] = json::Value(config.level);
+    out["console"] = json::Value(config.console);
+    out["max_file_bytes"] = json::Value(config.maxFileBytes);
+    out["max_rotated_files"] = json::Value(static_cast<std::uint64_t>(config.maxRotatedFiles));
+    return out;
+}
+
+json::Value::Object toJson(const Config& config) {
+    json::Value::Object out;
+    out["download"] = json::Value(downloadToJson(config.download));
+    out["network"] = json::Value(networkToJson(config.network));
+    out["persistence"] = json::Value(persistenceToJson(config.persistence));
+    out["logging"] = json::Value(loggingToJson(config.logging));
     return out;
 }
 
@@ -39,13 +71,215 @@ std::string uniqueTempPathFor(const std::filesystem::path& path) {
     return out.str();
 }
 
+std::string lower(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+std::uint32_t parsePositiveUintLocal(const std::string& key, const std::string& value) {
+    if (value.empty()) {
+        throw CgetError(ErrorCode::InvalidCommandError, key + " requires a positive integer");
+    }
+    std::uint64_t parsed = 0;
+    for (const char c : value) {
+        if (c < '0' || c > '9') {
+            throw CgetError(ErrorCode::InvalidCommandError, key + " requires a positive integer");
+        }
+        parsed = parsed * 10 + static_cast<std::uint64_t>(c - '0');
+    }
+    if (parsed == 0 || parsed > std::numeric_limits<std::uint32_t>::max()) {
+        throw CgetError(ErrorCode::InvalidCommandError, key + " is out of range");
+    }
+    return static_cast<std::uint32_t>(parsed);
+}
+
+std::uint64_t parseUint64Local(const std::string& key, const std::string& value) {
+    if (value.empty()) {
+        throw CgetError(ErrorCode::InvalidCommandError, key + " requires an integer");
+    }
+    std::uint64_t parsed = 0;
+    for (const char c : value) {
+        if (c < '0' || c > '9') {
+            throw CgetError(ErrorCode::InvalidCommandError, key + " requires an integer");
+        }
+        const auto digit = static_cast<std::uint64_t>(c - '0');
+        if (parsed > (std::numeric_limits<std::uint64_t>::max() - digit) / 10U) {
+            throw CgetError(ErrorCode::InvalidCommandError, key + " is out of range");
+        }
+        parsed = parsed * 10U + digit;
+    }
+    return parsed;
+}
+
+std::string canonicalKeyName(const std::string& key) {
+    if (key == "max_threads" || key == "download.max_threads") return "download.max_threads";
+    if (key == "max_active_tasks" || key == "download.max_active_tasks") return "download.max_active_tasks";
+    if (key == "max_download_rate_bytes_per_sec" || key == "download.max_download_rate_bytes_per_sec") {
+        return "download.max_download_rate_bytes_per_sec";
+    }
+    if (key == "max_retries" || key == "network.max_retries") return "network.max_retries";
+    if (key == "retry_base_delay_ms" || key == "network.retry_base_delay_ms") {
+        return "network.retry_base_delay_ms";
+    }
+    if (key == "proxy" || key == "network.proxy") return "network.proxy";
+    if (key == "persistence.flush_interval_ms") return "persistence.flush_interval_ms";
+    if (key == "logging.level") return "logging.level";
+    if (key == "logging.console") return "logging.console";
+    if (key == "logging.max_file_bytes") return "logging.max_file_bytes";
+    if (key == "logging.max_rotated_files") return "logging.max_rotated_files";
+    throw CgetError(ErrorCode::InvalidCommandError, "unknown config key: " + key);
+}
+
+bool isValidLogLevelName(const std::string& value) {
+    const auto normalized = lower(value);
+    return normalized == "trace" || normalized == "debug" || normalized == "info" || normalized == "warn" ||
+           normalized == "warning" || normalized == "error" || normalized == "fatal" || normalized == "off" ||
+           normalized == "none";
+}
+
+void readUint32(const json::Value& object, const std::string& key, std::uint32_t& out) {
+    if (object.contains(key)) {
+        out = static_cast<std::uint32_t>(object.at(key).asUint64());
+    }
+}
+
+void readUint64(const json::Value& object, const std::string& key, std::uint64_t& out) {
+    if (object.contains(key)) {
+        out = object.at(key).asUint64();
+    }
+}
+
+void readString(const json::Value& object, const std::string& key, std::string& out) {
+    if (object.contains(key) && !object.at(key).isNull()) {
+        out = object.at(key).asString();
+    }
+}
+
+void readBool(const json::Value& object, const std::string& key, bool& out) {
+    if (object.contains(key)) {
+        out = object.at(key).asBool();
+    }
+}
+
+void applyLegacyConfig(const json::Value& root, Config& config) {
+    readUint32(root, "max_threads", config.download.maxThreads);
+    readUint32(root, "max_active_tasks", config.download.maxActiveTasks);
+    readUint32(root, "max_retries", config.network.maxRetries);
+    readUint32(root, "retry_base_delay_ms", config.network.retryBaseDelayMs);
+    readUint64(root, "max_download_rate_bytes_per_sec", config.download.maxDownloadRateBytesPerSec);
+    if (root.contains("proxy_url") && !root.at("proxy_url").isNull()) {
+        config.network.proxyUrl = root.at("proxy_url").asString();
+    }
+}
+
+void applyNestedConfig(const json::Value& root, Config& config) {
+    if (root.contains("download") && root.at("download").isObject()) {
+        const auto& download = root.at("download");
+        readUint32(download, "max_threads", config.download.maxThreads);
+        readUint32(download, "max_active_tasks", config.download.maxActiveTasks);
+        readUint64(download, "max_download_rate_bytes_per_sec", config.download.maxDownloadRateBytesPerSec);
+    }
+    if (root.contains("network") && root.at("network").isObject()) {
+        const auto& network = root.at("network");
+        readUint32(network, "max_retries", config.network.maxRetries);
+        readUint32(network, "retry_base_delay_ms", config.network.retryBaseDelayMs);
+        if (network.contains("proxy") && !network.at("proxy").isNull()) {
+            config.network.proxyUrl = network.at("proxy").asString();
+        }
+    }
+    if (root.contains("persistence") && root.at("persistence").isObject()) {
+        const auto& persistence = root.at("persistence");
+        readUint32(persistence, "flush_interval_ms", config.persistence.flushIntervalMs);
+    }
+    if (root.contains("logging") && root.at("logging").isObject()) {
+        const auto& logging = root.at("logging");
+        readString(logging, "level", config.logging.level);
+        readBool(logging, "console", config.logging.console);
+        readUint64(logging, "max_file_bytes", config.logging.maxFileBytes);
+        readUint32(logging, "max_rotated_files", config.logging.maxRotatedFiles);
+    }
+}
+
+bool parseBoolValue(const std::string& value, bool& out) {
+    const auto normalized = lower(value);
+    if (normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on") {
+        out = true;
+        return true;
+    }
+    if (normalized == "0" || normalized == "false" || normalized == "no" || normalized == "off") {
+        out = false;
+        return true;
+    }
+    return false;
+}
+
+void applyEnv(Config& config) {
+    if (const char* value = std::getenv("CGET_MAX_THREADS")) {
+        config.download.maxThreads = parsePositiveUintLocal("CGET_MAX_THREADS", value);
+    }
+    if (const char* value = std::getenv("CGET_MAX_ACTIVE_TASKS")) {
+        config.download.maxActiveTasks = parsePositiveUintLocal("CGET_MAX_ACTIVE_TASKS", value);
+    }
+    if (const char* value = std::getenv("CGET_MAX_RETRIES")) {
+        config.network.maxRetries = parsePositiveUintLocal("CGET_MAX_RETRIES", value);
+    }
+    if (const char* value = std::getenv("CGET_RETRY_BASE_DELAY_MS")) {
+        config.network.retryBaseDelayMs = parsePositiveUintLocal("CGET_RETRY_BASE_DELAY_MS", value);
+    }
+    if (const char* value = std::getenv("CGET_MAX_DOWNLOAD_RATE_BYTES_PER_SEC")) {
+        config.download.maxDownloadRateBytesPerSec =
+            parseUint64Local("CGET_MAX_DOWNLOAD_RATE_BYTES_PER_SEC", value);
+    }
+    if (const char* value = std::getenv("CGET_PROXY")) {
+        if (*value == '\0' || std::string(value) == "none") {
+            config.network.proxyUrl.reset();
+        } else {
+            config.network.proxyUrl = value;
+        }
+    }
+    if (const char* value = std::getenv("CGET_LOG_LEVEL")) {
+        if (isValidLogLevelName(value)) {
+            config.logging.level = lower(value);
+        }
+    }
+    if (const char* value = std::getenv("CGET_LOG_CONSOLE")) {
+        bool parsed = false;
+        if (parseBoolValue(value, parsed)) {
+            config.logging.console = parsed;
+        }
+    }
+}
+
+void normalize(Config& config) {
+    config.download.maxThreads = std::max<std::uint32_t>(1, std::min<std::uint32_t>(config.download.maxThreads, 32));
+    config.download.maxActiveTasks =
+        std::max<std::uint32_t>(1, std::min<std::uint32_t>(config.download.maxActiveTasks, 16));
+    config.network.maxRetries = std::min<std::uint32_t>(config.network.maxRetries, 10);
+    config.network.retryBaseDelayMs =
+        std::max<std::uint32_t>(100, std::min<std::uint32_t>(config.network.retryBaseDelayMs, 60000));
+    config.persistence.flushIntervalMs =
+        std::max<std::uint32_t>(100, std::min<std::uint32_t>(config.persistence.flushIntervalMs, 60000));
+    config.logging.level = isValidLogLevelName(config.logging.level) ? lower(config.logging.level) : "info";
+    config.logging.maxRotatedFiles = std::min<std::uint32_t>(config.logging.maxRotatedFiles, 16);
+}
+
 std::string valueForKey(const Config& config, const std::string& key) {
-    if (key == "max_threads") return std::to_string(config.maxThreads);
-    if (key == "max_active_tasks") return std::to_string(config.maxActiveTasks);
-    if (key == "max_retries") return std::to_string(config.maxRetries);
-    if (key == "retry_base_delay_ms") return std::to_string(config.retryBaseDelayMs);
-    if (key == "max_download_rate_bytes_per_sec") return std::to_string(config.maxDownloadRateBytesPerSec);
-    if (key == "proxy") return config.proxyUrl.value_or("none");
+    const auto canonical = canonicalKeyName(key);
+    if (canonical == "download.max_threads") return std::to_string(config.download.maxThreads);
+    if (canonical == "download.max_active_tasks") return std::to_string(config.download.maxActiveTasks);
+    if (canonical == "download.max_download_rate_bytes_per_sec") {
+        return std::to_string(config.download.maxDownloadRateBytesPerSec);
+    }
+    if (canonical == "network.max_retries") return std::to_string(config.network.maxRetries);
+    if (canonical == "network.retry_base_delay_ms") return std::to_string(config.network.retryBaseDelayMs);
+    if (canonical == "network.proxy") return config.network.proxyUrl.value_or("none");
+    if (canonical == "persistence.flush_interval_ms") return std::to_string(config.persistence.flushIntervalMs);
+    if (canonical == "logging.level") return config.logging.level;
+    if (canonical == "logging.console") return config.logging.console ? "true" : "false";
+    if (canonical == "logging.max_file_bytes") return std::to_string(config.logging.maxFileBytes);
+    if (canonical == "logging.max_rotated_files") return std::to_string(config.logging.maxRotatedFiles);
     throw CgetError(ErrorCode::InvalidCommandError, "unknown config key: " + key);
 }
 
@@ -56,37 +290,20 @@ ConfigManager::ConfigManager(FileSystemService fileSystem) : fileSystem_(std::mo
 Config ConfigManager::load() const {
     fileSystem_.ensureDirectories();
     const auto path = fileSystem_.configPath();
+    Config config;
     if (!std::filesystem::exists(path)) {
-        Config config;
         save(config);
+        applyEnv(config);
+        normalize(config);
         return config;
     }
 
     try {
         const auto root = json::parse(readTextFile(path));
-        Config config;
-        if (root.contains("max_threads")) {
-            config.maxThreads = static_cast<std::uint32_t>(root.at("max_threads").asUint64());
-        }
-        if (root.contains("max_active_tasks")) {
-            config.maxActiveTasks = static_cast<std::uint32_t>(root.at("max_active_tasks").asUint64());
-        }
-        if (root.contains("max_retries")) {
-            config.maxRetries = static_cast<std::uint32_t>(root.at("max_retries").asUint64());
-        }
-        if (root.contains("retry_base_delay_ms")) {
-            config.retryBaseDelayMs = static_cast<std::uint32_t>(root.at("retry_base_delay_ms").asUint64());
-        }
-        if (root.contains("max_download_rate_bytes_per_sec")) {
-            config.maxDownloadRateBytesPerSec = root.at("max_download_rate_bytes_per_sec").asUint64();
-        }
-        if (root.contains("proxy_url") && !root.at("proxy_url").isNull()) {
-            config.proxyUrl = root.at("proxy_url").asString();
-        }
-        config.maxThreads = std::max<std::uint32_t>(1, std::min<std::uint32_t>(config.maxThreads, 32));
-        config.maxActiveTasks = std::max<std::uint32_t>(1, std::min<std::uint32_t>(config.maxActiveTasks, 16));
-        config.maxRetries = std::min<std::uint32_t>(config.maxRetries, 10);
-        config.retryBaseDelayMs = std::max<std::uint32_t>(100, std::min<std::uint32_t>(config.retryBaseDelayMs, 60000));
+        applyLegacyConfig(root, config);
+        applyNestedConfig(root, config);
+        applyEnv(config);
+        normalize(config);
         return config;
     } catch (const std::exception& error) {
         throw CgetError(ErrorCode::JsonCorruptedError, "failed to read config: " + std::string(error.what()));
@@ -95,6 +312,8 @@ Config ConfigManager::load() const {
 
 void ConfigManager::save(const Config& config) const {
     fileSystem_.ensureDirectories();
+    auto normalized = config;
+    normalize(normalized);
     const auto path = fileSystem_.configPath();
     const auto tmp = uniqueTempPathFor(path);
     {
@@ -102,7 +321,7 @@ void ConfigManager::save(const Config& config) const {
         if (!output) {
             throw CgetError(ErrorCode::PermissionDeniedError, "failed to write config: " + tmp);
         }
-        output << json::stringify(json::Value(toJson(config)));
+        output << json::stringify(json::Value(toJson(normalized)));
     }
     std::error_code ec;
     std::filesystem::rename(tmp, path, ec);
@@ -123,43 +342,66 @@ std::string ConfigManager::get(const std::string& key) const {
 
 void ConfigManager::set(const std::string& key, const std::string& value) const {
     validateKey(key);
+    const auto canonical = canonicalKey(key);
     auto config = load();
-    if (key == "max_threads") {
+    if (canonical == "download.max_threads") {
         const auto parsed = parsePositiveUint(key, value);
         if (parsed > 32) {
             throw CgetError(ErrorCode::InvalidCommandError, "max_threads must be <= 32");
         }
-        config.maxThreads = parsed;
-    } else if (key == "max_active_tasks") {
+        config.download.maxThreads = parsed;
+    } else if (canonical == "download.max_active_tasks") {
         const auto parsed = parsePositiveUint(key, value);
         if (parsed > 16) {
             throw CgetError(ErrorCode::InvalidCommandError, "max_active_tasks must be <= 16");
         }
-        config.maxActiveTasks = parsed;
-    } else if (key == "max_retries") {
+        config.download.maxActiveTasks = parsed;
+    } else if (canonical == "download.max_download_rate_bytes_per_sec") {
+        config.download.maxDownloadRateBytesPerSec = parseUint64(key, value);
+    } else if (canonical == "network.max_retries") {
         const auto parsed = parsePositiveUint(key, value);
         if (parsed > 10) {
             throw CgetError(ErrorCode::InvalidCommandError, "max_retries must be <= 10");
         }
-        config.maxRetries = parsed;
-    } else if (key == "retry_base_delay_ms") {
+        config.network.maxRetries = parsed;
+    } else if (canonical == "network.retry_base_delay_ms") {
         const auto parsed = parsePositiveUint(key, value);
         if (parsed < 100 || parsed > 60000) {
             throw CgetError(ErrorCode::InvalidCommandError, "retry_base_delay_ms must be between 100 and 60000");
         }
-        config.retryBaseDelayMs = parsed;
-    } else if (key == "max_download_rate_bytes_per_sec") {
-        config.maxDownloadRateBytesPerSec = parseUint64(key, value);
-    } else if (key == "proxy") {
+        config.network.retryBaseDelayMs = parsed;
+    } else if (canonical == "network.proxy") {
         if (value == "none" || value == "off" || value == "disable" || value == "disabled") {
-            config.proxyUrl.reset();
+            config.network.proxyUrl.reset();
         } else if (value.rfind("http://", 0) == 0 || value.rfind("https://", 0) == 0 ||
                    value.rfind("socks5://", 0) == 0) {
-            config.proxyUrl = value;
+            config.network.proxyUrl = value;
         } else {
             throw CgetError(ErrorCode::InvalidCommandError,
                            "proxy must be none, http://..., https://..., or socks5://...");
         }
+    } else if (canonical == "persistence.flush_interval_ms") {
+        const auto parsed = parsePositiveUint(key, value);
+        if (parsed < 100 || parsed > 60000) {
+            throw CgetError(ErrorCode::InvalidCommandError, "flush_interval_ms must be between 100 and 60000");
+        }
+        config.persistence.flushIntervalMs = parsed;
+    } else if (canonical == "logging.level") {
+        if (!isValidLogLevelName(value)) {
+            throw CgetError(ErrorCode::InvalidCommandError,
+                           "logging.level must be trace, debug, info, warn, error, fatal, or off");
+        }
+        config.logging.level = lower(value);
+    } else if (canonical == "logging.console") {
+        config.logging.console = parseBool(key, value);
+    } else if (canonical == "logging.max_file_bytes") {
+        config.logging.maxFileBytes = parseUint64(key, value);
+    } else if (canonical == "logging.max_rotated_files") {
+        const auto parsed = parsePositiveUint(key, value);
+        if (parsed > 16) {
+            throw CgetError(ErrorCode::InvalidCommandError, "logging.max_rotated_files must be <= 16");
+        }
+        config.logging.maxRotatedFiles = parsed;
     }
     save(config);
 }
@@ -167,54 +409,40 @@ void ConfigManager::set(const std::string& key, const std::string& value) const 
 std::vector<std::pair<std::string, std::string>> ConfigManager::entries() const {
     const auto config = load();
     return {
-        {"max_threads", std::to_string(config.maxThreads)},
-        {"max_active_tasks", std::to_string(config.maxActiveTasks)},
-        {"max_retries", std::to_string(config.maxRetries)},
-        {"retry_base_delay_ms", std::to_string(config.retryBaseDelayMs)},
-        {"max_download_rate_bytes_per_sec", std::to_string(config.maxDownloadRateBytesPerSec)},
-        {"proxy", config.proxyUrl.value_or("none")},
+        {"download.max_threads", std::to_string(config.download.maxThreads)},
+        {"download.max_active_tasks", std::to_string(config.download.maxActiveTasks)},
+        {"download.max_download_rate_bytes_per_sec", std::to_string(config.download.maxDownloadRateBytesPerSec)},
+        {"network.max_retries", std::to_string(config.network.maxRetries)},
+        {"network.retry_base_delay_ms", std::to_string(config.network.retryBaseDelayMs)},
+        {"network.proxy", config.network.proxyUrl.value_or("none")},
+        {"persistence.flush_interval_ms", std::to_string(config.persistence.flushIntervalMs)},
+        {"logging.level", config.logging.level},
+        {"logging.console", config.logging.console ? "true" : "false"},
+        {"logging.max_file_bytes", std::to_string(config.logging.maxFileBytes)},
+        {"logging.max_rotated_files", std::to_string(config.logging.maxRotatedFiles)},
     };
 }
 
 void ConfigManager::validateKey(const std::string& key) {
-    if (key == "max_threads" || key == "max_active_tasks" || key == "max_retries" ||
-        key == "retry_base_delay_ms" || key == "max_download_rate_bytes_per_sec" || key == "proxy") {
-        return;
-    }
-    throw CgetError(ErrorCode::InvalidCommandError, "unknown config key: " + key);
+    (void)canonicalKey(key);
+}
+
+std::string ConfigManager::canonicalKey(const std::string& key) {
+    return canonicalKeyName(key);
 }
 
 std::uint32_t ConfigManager::parsePositiveUint(const std::string& key, const std::string& value) {
-    if (value.empty()) {
-        throw CgetError(ErrorCode::InvalidCommandError, key + " requires a positive integer");
-    }
-    std::uint64_t parsed = 0;
-    for (const char c : value) {
-        if (c < '0' || c > '9') {
-            throw CgetError(ErrorCode::InvalidCommandError, key + " requires a positive integer");
-        }
-        parsed = parsed * 10 + static_cast<std::uint64_t>(c - '0');
-    }
-    if (parsed == 0 || parsed > std::numeric_limits<std::uint32_t>::max()) {
-        throw CgetError(ErrorCode::InvalidCommandError, key + " is out of range");
-    }
-    return static_cast<std::uint32_t>(parsed);
+    return parsePositiveUintLocal(key, value);
 }
 
 std::uint64_t ConfigManager::parseUint64(const std::string& key, const std::string& value) {
-    if (value.empty()) {
-        throw CgetError(ErrorCode::InvalidCommandError, key + " requires an integer");
-    }
-    std::uint64_t parsed = 0;
-    for (const char c : value) {
-        if (c < '0' || c > '9') {
-            throw CgetError(ErrorCode::InvalidCommandError, key + " requires an integer");
-        }
-        const auto digit = static_cast<std::uint64_t>(c - '0');
-        if (parsed > (std::numeric_limits<std::uint64_t>::max() - digit) / 10U) {
-            throw CgetError(ErrorCode::InvalidCommandError, key + " is out of range");
-        }
-        parsed = parsed * 10U + digit;
+    return parseUint64Local(key, value);
+}
+
+bool ConfigManager::parseBool(const std::string& key, const std::string& value) {
+    bool parsed = false;
+    if (!parseBoolValue(value, parsed)) {
+        throw CgetError(ErrorCode::InvalidCommandError, key + " requires true or false");
     }
     return parsed;
 }

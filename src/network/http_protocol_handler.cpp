@@ -10,6 +10,7 @@
 
 #include "cget/core/errors.h"
 #include "cget/network/protocol_registry.h"
+#include "cget/version.hpp"
 
 namespace cget {
 namespace {
@@ -68,7 +69,7 @@ void configureCommon(CURL* curl, const std::string& url, const std::string& prox
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 30L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "cget/1.0");
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, CGET_USER_AGENT);
     curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errorBuffer);
     if (!proxyUrl.empty()) {
         curl_easy_setopt(curl, CURLOPT_PROXY, proxyUrl.c_str());

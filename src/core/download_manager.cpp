@@ -14,6 +14,18 @@
 #include "cget/network/protocol_registry.h"
 
 namespace cget {
+namespace {
+
+LoggerOptions loggerOptionsFromConfig(const Config& config) {
+    LoggerOptions options;
+    options.level = logLevelFromString(config.logging.level);
+    options.console = config.logging.console;
+    options.maxFileBytes = config.logging.maxFileBytes;
+    options.maxRotatedFiles = config.logging.maxRotatedFiles;
+    return options;
+}
+
+}  // namespace
 
 DownloadManager::DownloadManager() : DownloadManager(FileSystemService()) {}
 
@@ -21,7 +33,7 @@ DownloadManager::DownloadManager(FileSystemService fileSystem)
     : fileSystem_(std::move(fileSystem)),
       persistence_(fileSystem_),
       config_(fileSystem_),
-      logger_(fileSystem_) {}
+      logger_(fileSystem_, loggerOptionsFromConfig(config_.load())) {}
 
 DownloadTask DownloadManager::createTask(const CreateTaskRequest& request) {
     validateUrl(request.url);
@@ -54,18 +66,24 @@ void DownloadManager::downloadTask(DownloadTask& task) {
     if (task.status == TaskStatus::Completed) {
         return;
     }
+    if (task.status == TaskStatus::PendingRecovery || task.status == TaskStatus::Corrupted ||
+        task.status == TaskStatus::MetadataMismatch) {
+        throw CgetError(ErrorCode::InvalidStateTransitionError,
+                       "cannot download task in state " + toString(task.status));
+    }
     task.status = TaskStatus::Queued;
     persistence_.saveTask(task);
     const auto config = config_.load();
-    DownloadEngine engine(ProtocolRegistry::create(task.url, config.proxyUrl.value_or("")), fileSystem_, persistence_,
-                          config);
+    DownloadEngine engine(ProtocolRegistry::create(task.url, config.network.proxyUrl.value_or("")), fileSystem_,
+                          persistence_, config);
     engine.download(task);
 }
 
 void DownloadManager::pauseTask(const TaskId& id) {
     auto task = persistence_.loadTask(id);
     if (task.status == TaskStatus::Completed || task.status == TaskStatus::Removed ||
-        task.status == TaskStatus::Corrupted) {
+        task.status == TaskStatus::Corrupted || task.status == TaskStatus::PendingRecovery ||
+        task.status == TaskStatus::MetadataMismatch) {
         throw CgetError(ErrorCode::InvalidStateTransitionError, "cannot pause task in state " + toString(task.status));
     }
     task.status = TaskStatus::Paused;
@@ -102,7 +120,8 @@ std::vector<TaskSnapshot> DownloadManager::runQueuedTasks() {
     }
 
     const auto config = config_.load();
-    const auto workerCount = std::min<std::size_t>(std::max<std::uint32_t>(1, config.maxActiveTasks), runnable.size());
+    const auto workerCount =
+        std::min<std::size_t>(std::max<std::uint32_t>(1, config.download.maxActiveTasks), runnable.size());
     std::atomic<std::size_t> next{0};
     std::mutex resultsMutex;
     std::vector<TaskSnapshot> results;

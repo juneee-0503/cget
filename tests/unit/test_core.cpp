@@ -5,6 +5,7 @@
 #include <iostream>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -13,6 +14,7 @@
 #include "cget/core/chunk_planner.h"
 #include "cget/core/download_manager.h"
 #include "cget/core/errors.h"
+#include "cget/core/logger.h"
 #include "cget/core/task_state.h"
 #include "cget/crypto/sha256.h"
 #include "cget/engine/download_engine.h"
@@ -33,6 +35,22 @@ std::filesystem::path makeTempHome(const std::string& name) {
 
 char* mutableArg(const char* value) {
     return const_cast<char*>(value);
+}
+
+void setEnv(const char* key, const char* value) {
+#if defined(_WIN32)
+    _putenv_s(key, value);
+#else
+    setenv(key, value, 1);
+#endif
+}
+
+void unsetEnv(const char* key) {
+#if defined(_WIN32)
+    _putenv_s(key, "");
+#else
+    unsetenv(key);
+#endif
 }
 
 void testCliParser() {
@@ -124,6 +142,8 @@ void testChunkPlanner() {
 void testStateMachine() {
     assert(cget::isValidTransition(cget::TaskStatus::Created, cget::TaskStatus::Pending));
     assert(cget::isValidTransition(cget::TaskStatus::Downloading, cget::TaskStatus::Completed));
+    assert(cget::isValidTransition(cget::TaskStatus::Downloading, cget::TaskStatus::PendingRecovery));
+    assert(cget::isValidTransition(cget::TaskStatus::PendingRecovery, cget::TaskStatus::Paused));
     assert(!cget::isValidTransition(cget::TaskStatus::Completed, cget::TaskStatus::Downloading));
 }
 
@@ -153,18 +173,21 @@ void testConfigManager() {
     cget::FileSystemService fs(makeTempHome("config"));
     cget::ConfigManager manager(fs);
     auto config = manager.load();
-    assert(config.maxThreads == 8);
+    assert(config.download.maxThreads == 8);
     manager.set("max_threads", "4");
-    manager.set("max_active_tasks", "3");
+    manager.set("download.max_active_tasks", "3");
     assert(manager.get("max_threads") == "4");
-    assert(manager.get("max_active_tasks") == "3");
-    manager.set("max_download_rate_bytes_per_sec", "0");
-    manager.set("proxy", "http://127.0.0.1:9999");
+    assert(manager.get("download.max_active_tasks") == "3");
+    manager.set("download.max_download_rate_bytes_per_sec", "0");
+    manager.set("network.proxy", "http://127.0.0.1:9999");
+    manager.set("logging.level", "debug");
+    manager.set("logging.console", "false");
     assert(manager.get("max_download_rate_bytes_per_sec") == "0");
     assert(manager.get("proxy") == "http://127.0.0.1:9999");
+    assert(manager.get("logging.level") == "debug");
     manager.set("proxy", "none");
-    assert(manager.get("proxy") == "none");
-    assert(manager.entries().size() == 6);
+    assert(manager.get("network.proxy") == "none");
+    assert(manager.entries().size() == 11);
 
     bool threw = false;
     try {
@@ -173,6 +196,67 @@ void testConfigManager() {
         threw = true;
     }
     assert(threw);
+
+    {
+        cget::FileSystemService legacyFs(makeTempHome("config_legacy"));
+        legacyFs.ensureDirectories();
+        {
+            std::ofstream legacy(legacyFs.configPath());
+            legacy << "{\n"
+                   << "  \"max_threads\": 5,\n"
+                   << "  \"max_active_tasks\": 2,\n"
+                   << "  \"max_retries\": 4,\n"
+                   << "  \"retry_base_delay_ms\": 500,\n"
+                   << "  \"max_download_rate_bytes_per_sec\": 1024,\n"
+                   << "  \"proxy_url\": \"http://127.0.0.1:8080\"\n"
+                   << "}\n";
+        }
+        cget::ConfigManager legacyManager(legacyFs);
+        const auto loaded = legacyManager.load();
+        assert(loaded.download.maxThreads == 5);
+        assert(loaded.network.maxRetries == 4);
+        assert(loaded.network.proxyUrl == "http://127.0.0.1:8080");
+    }
+
+    {
+        setEnv("CGET_MAX_THREADS", "6");
+        setEnv("CGET_LOG_LEVEL", "warn");
+        setEnv("CGET_PROXY", "none");
+        cget::FileSystemService envFs(makeTempHome("config_env"));
+        cget::ConfigManager envManager(envFs);
+        const auto loaded = envManager.load();
+        assert(loaded.download.maxThreads == 6);
+        assert(loaded.logging.level == "warn");
+        assert(!loaded.network.proxyUrl.has_value());
+        unsetEnv("CGET_MAX_THREADS");
+        unsetEnv("CGET_LOG_LEVEL");
+        unsetEnv("CGET_PROXY");
+    }
+}
+
+void testErrorModel() {
+    assert(cget::toString(cget::ErrorCode::NetworkError) == "NetworkError");
+    assert(cget::isRetryable(cget::ErrorCode::TimeoutError));
+    assert(!cget::isRetryable(cget::ErrorCode::PermissionDeniedError));
+    assert(cget::suggestedExitCode(cget::ErrorCode::InvalidCommandError) == 2);
+}
+
+void testLogger() {
+    cget::FileSystemService fs(makeTempHome("logger"));
+    cget::LoggerOptions options;
+    options.level = cget::LogLevel::Warn;
+    options.console = false;
+    options.maxFileBytes = 64;
+    options.maxRotatedFiles = 2;
+    cget::Logger logger(fs, options);
+    logger.debug("hidden debug message");
+    logger.error("visible error message");
+    assert(std::filesystem::exists(fs.logsDir() / "cget.log"));
+
+    for (int index = 0; index < 5; ++index) {
+        logger.warn("rotation message " + std::to_string(index) + " with enough bytes to rotate");
+    }
+    assert(std::filesystem::exists(fs.logsDir() / "cget.log.1"));
 }
 
 void testSha256() {
@@ -215,14 +299,24 @@ cget::DownloadTask makeTask(const cget::FileSystemService& fs) {
 
 class FakeProtocol final : public cget::ProtocolHandler {
 public:
-    FakeProtocol(std::string data, bool supportsRange, bool ignoreRange = false)
-        : data_(std::move(data)), supportsRange_(supportsRange), ignoreRange_(ignoreRange) {}
+    FakeProtocol(std::string data,
+                 bool supportsRange,
+                 bool ignoreRange = false,
+                 std::optional<std::string> etag = std::nullopt,
+                 std::optional<std::string> lastModified = std::nullopt)
+        : data_(std::move(data)),
+          supportsRange_(supportsRange),
+          ignoreRange_(ignoreRange),
+          etag_(std::move(etag)),
+          lastModified_(std::move(lastModified)) {}
 
     cget::RemoteFileInfo fetchMetadata(const std::string& url) override {
         cget::RemoteFileInfo info;
         info.fileSize = data_.size();
         info.supportsRange = supportsRange_;
         info.finalUrl = url;
+        info.etag = etag_;
+        info.lastModified = lastModified_;
         return info;
     }
 
@@ -253,6 +347,8 @@ private:
     std::string data_;
     bool supportsRange_;
     bool ignoreRange_;
+    std::optional<std::string> etag_;
+    std::optional<std::string> lastModified_;
 };
 
 std::string readBinary(const std::filesystem::path& path) {
@@ -349,6 +445,29 @@ void testDownloadEngineSha256Mismatch() {
     assert(task.lastError->find("SHA256 mismatch") != std::string::npos);
 }
 
+void testDownloadEngineMetadataMismatch() {
+    const std::string data = "metadata payload";
+    cget::FileSystemService fs(makeTempHome("engine_metadata"));
+    cget::PersistenceStore store(fs);
+    fs.ensureTaskTempDir("metadata");
+    cget::DownloadTask task;
+    task.id = "metadata";
+    task.url = "https://example.com/payload.bin";
+    task.fileName = "payload.bin";
+    task.targetPath = fs.downloadsDir() / "payload.bin";
+    task.tempDir = fs.taskTempDir(task.id);
+    task.status = cget::TaskStatus::Paused;
+    task.fileSize = data.size();
+    task.remoteEtag = "\"old\"";
+    store.saveTask(task);
+
+    cget::DownloadEngine engine(std::make_unique<FakeProtocol>(data, false, false, "\"new\""), fs, store,
+                                cget::Config{});
+    engine.download(task);
+    assert(task.status == cget::TaskStatus::MetadataMismatch);
+    assert(task.lastError.has_value());
+}
+
 void testPersistenceAndRecovery() {
     cget::FileSystemService fs(makeTempHome("persistence"));
     cget::PersistenceStore store(fs);
@@ -360,6 +479,14 @@ void testPersistenceAndRecovery() {
     assert(loaded.id == task.id);
     assert(loaded.chunks.size() == 2);
     assert(loaded.chunks[1].downloaded.load() == 3);
+    task.remoteEtag = "\"etag\"";
+    task.remoteLastModified = "Sun, 24 May 2026 00:00:00 GMT";
+    task.finalUrl = "https://example.com/file.bin";
+    store.saveTask(task);
+    loaded = store.loadTask("task1");
+    assert(loaded.remoteEtag == "\"etag\"");
+    assert(loaded.remoteLastModified == "Sun, 24 May 2026 00:00:00 GMT");
+    assert(loaded.finalUrl == "https://example.com/file.bin");
 
     task.lastError = "create backup";
     store.saveTask(task);
@@ -417,6 +544,8 @@ int main() {
     testCliParser();
     testChunkPlanner();
     testStateMachine();
+    testErrorModel();
+    testLogger();
     testSha256();
     testProtocolRegistry();
     testFileSystemPaths();
@@ -425,6 +554,7 @@ int main() {
     testManagerPauseAndRemove();
     testDownloadEngineRangeAndFallback();
     testDownloadEngineSha256Mismatch();
+    testDownloadEngineMetadataMismatch();
     std::cout << "all unit tests passed\n";
     return 0;
 }

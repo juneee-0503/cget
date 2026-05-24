@@ -116,6 +116,9 @@ DownloadTask::DownloadTask(const DownloadTask& other)
       startedAt(other.startedAt),
       lastError(other.lastError),
       expectedSha256(other.expectedSha256),
+      remoteEtag(other.remoteEtag),
+      remoteLastModified(other.remoteLastModified),
+      finalUrl(other.finalUrl),
       requestedThreads(other.requestedThreads) {}
 
 DownloadTask& DownloadTask::operator=(const DownloadTask& other) {
@@ -136,6 +139,9 @@ DownloadTask& DownloadTask::operator=(const DownloadTask& other) {
     startedAt = other.startedAt;
     lastError = other.lastError;
     expectedSha256 = other.expectedSha256;
+    remoteEtag = other.remoteEtag;
+    remoteLastModified = other.remoteLastModified;
+    finalUrl = other.finalUrl;
     requestedThreads = other.requestedThreads;
     return *this;
 }
@@ -155,6 +161,9 @@ DownloadTask::DownloadTask(DownloadTask&& other) noexcept
       startedAt(other.startedAt),
       lastError(std::move(other.lastError)),
       expectedSha256(std::move(other.expectedSha256)),
+      remoteEtag(std::move(other.remoteEtag)),
+      remoteLastModified(std::move(other.remoteLastModified)),
+      finalUrl(std::move(other.finalUrl)),
       requestedThreads(other.requestedThreads) {}
 
 DownloadTask& DownloadTask::operator=(DownloadTask&& other) noexcept {
@@ -175,6 +184,9 @@ DownloadTask& DownloadTask::operator=(DownloadTask&& other) noexcept {
     startedAt = other.startedAt;
     lastError = std::move(other.lastError);
     expectedSha256 = std::move(other.expectedSha256);
+    remoteEtag = std::move(other.remoteEtag);
+    remoteLastModified = std::move(other.remoteLastModified);
+    finalUrl = std::move(other.finalUrl);
     requestedThreads = other.requestedThreads;
     return *this;
 }
@@ -192,6 +204,7 @@ std::string toString(TaskStatus status) {
         case TaskStatus::Cancelled: return "Cancelled";
         case TaskStatus::Removed: return "Removed";
         case TaskStatus::Corrupted: return "Corrupted";
+        case TaskStatus::PendingRecovery: return "PendingRecovery";
         case TaskStatus::MetadataMismatch: return "MetadataMismatch";
     }
     return "Unknown";
@@ -220,6 +233,7 @@ TaskStatus taskStatusFromString(const std::string& value) {
     if (value == "Cancelled") return TaskStatus::Cancelled;
     if (value == "Removed") return TaskStatus::Removed;
     if (value == "Corrupted") return TaskStatus::Corrupted;
+    if (value == "PendingRecovery") return TaskStatus::PendingRecovery;
     if (value == "MetadataMismatch") return TaskStatus::MetadataMismatch;
     throw std::invalid_argument("unknown task status: " + value);
 }
@@ -246,6 +260,9 @@ TaskSnapshot snapshotTask(const DownloadTask& task) {
     snapshot.progress = std::clamp(snapshot.progress, 0.0, 100.0);
     snapshot.lastError = task.lastError;
     snapshot.expectedSha256 = task.expectedSha256;
+    snapshot.remoteEtag = task.remoteEtag;
+    snapshot.remoteLastModified = task.remoteLastModified;
+    snapshot.finalUrl = task.finalUrl;
     snapshot.totalChunks = static_cast<std::uint32_t>(task.chunks.size());
     for (const auto& chunk : task.chunks) {
         if (chunk.status == ChunkStatus::Completed) {

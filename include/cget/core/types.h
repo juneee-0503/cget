@@ -25,6 +25,7 @@ enum class TaskStatus {
     Cancelled,
     Removed,
     Corrupted,
+    PendingRecovery,
     MetadataMismatch
 };
 
@@ -94,6 +95,9 @@ struct DownloadTask {
     std::optional<std::chrono::system_clock::time_point> startedAt;
     std::optional<std::string> lastError;
     std::optional<std::string> expectedSha256;
+    std::optional<std::string> remoteEtag;
+    std::optional<std::string> remoteLastModified;
+    std::optional<std::string> finalUrl;
     std::uint32_t requestedThreads = 0;
     mutable std::mutex mutex;
 
@@ -115,6 +119,9 @@ struct TaskSnapshot {
     double progress = 0.0;
     std::optional<std::string> lastError;
     std::optional<std::string> expectedSha256;
+    std::optional<std::string> remoteEtag;
+    std::optional<std::string> remoteLastModified;
+    std::optional<std::string> finalUrl;
     std::uint32_t completedChunks = 0;
     std::uint32_t totalChunks = 0;
     std::uint32_t retryCount = 0;

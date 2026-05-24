@@ -22,7 +22,10 @@ enum class ErrorCode {
     InvalidStateTransitionError,
     InvalidCommandError,
     InvalidUrlError,
-    FileSystemError
+    FileSystemError,
+    ConfigError,
+    ChecksumMismatchError,
+    InternalError
 };
 
 class CgetError : public std::runtime_error {
@@ -35,5 +38,9 @@ public:
 private:
     ErrorCode code_;
 };
+
+[[nodiscard]] std::string toString(ErrorCode code);
+[[nodiscard]] bool isRetryable(ErrorCode code);
+[[nodiscard]] int suggestedExitCode(ErrorCode code);
 
 }  // namespace cget

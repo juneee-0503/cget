@@ -57,6 +57,15 @@ void printSnapshot(const cget::TaskSnapshot& snapshot) {
     if (snapshot.expectedSha256) {
         std::cout << "Expected SHA256: " << *snapshot.expectedSha256 << '\n';
     }
+    if (snapshot.remoteEtag) {
+        std::cout << "Remote ETag: " << *snapshot.remoteEtag << '\n';
+    }
+    if (snapshot.remoteLastModified) {
+        std::cout << "Remote Last-Modified: " << *snapshot.remoteLastModified << '\n';
+    }
+    if (snapshot.finalUrl) {
+        std::cout << "Final URL: " << *snapshot.finalUrl << '\n';
+    }
 }
 
 void printList(const std::vector<cget::TaskSnapshot>& tasks) {
@@ -110,8 +119,6 @@ int main(int argc, char** argv) {
     cget::CliParser parser;
     try {
         const auto command = parser.parse(argc, argv);
-        cget::DownloadManager manager;
-        cget::ConfigManager config{cget::FileSystemService()};
 
         switch (command.type) {
             case cget::CommandType::Help:
@@ -121,20 +128,33 @@ int main(int argc, char** argv) {
                 std::cout << parser.versionText() << '\n';
                 return 0;
             case cget::CommandType::List:
+            {
+                cget::DownloadManager manager;
                 printList(manager.listTasks());
                 return 0;
+            }
             case cget::CommandType::Status:
+            {
+                cget::DownloadManager manager;
                 printSnapshot(manager.getTaskSnapshot(command.args.at(0)));
                 return 0;
+            }
             case cget::CommandType::Pause:
+            {
+                cget::DownloadManager manager;
                 manager.pauseTask(command.args.at(0));
                 std::cout << "Task paused: " << command.args.at(0) << '\n';
                 return 0;
+            }
             case cget::CommandType::Remove:
+            {
+                cget::DownloadManager manager;
                 manager.removeTask(command.args.at(0));
                 std::cout << "Task removed: " << command.args.at(0) << '\n';
                 return 0;
+            }
             case cget::CommandType::Run: {
+                cget::DownloadManager manager;
                 const auto results = manager.runQueuedTasks();
                 if (results.empty()) {
                     std::cout << "No queued tasks.\n";
@@ -146,6 +166,8 @@ int main(int argc, char** argv) {
                 }) ? 0 : 1;
             }
             case cget::CommandType::ConfigGet:
+            {
+                cget::ConfigManager config{cget::FileSystemService()};
                 if (command.args.empty()) {
                     for (const auto& [key, value] : config.entries()) {
                         std::cout << key << " = " << value << '\n';
@@ -154,19 +176,25 @@ int main(int argc, char** argv) {
                     std::cout << command.args.at(0) << " = " << config.get(command.args.at(0)) << '\n';
                 }
                 return 0;
+            }
             case cget::CommandType::ConfigSet:
+            {
+                cget::ConfigManager config{cget::FileSystemService()};
                 config.set(command.args.at(0), command.args.at(1));
                 std::cout << command.args.at(0) << " = " << config.get(command.args.at(0)) << '\n';
                 return 0;
+            }
             case cget::CommandType::Protocols:
                 printProtocols();
                 return 0;
             case cget::CommandType::Recover: {
+                cget::DownloadManager manager;
                 const auto recovered = manager.recoverTasks();
                 std::cout << "Recovered " << recovered.size() << " task(s).\n";
                 return 0;
             }
             case cget::CommandType::Add: {
+                cget::DownloadManager manager;
                 cget::CreateTaskRequest request;
                 request.url = command.args.at(0);
                 request.requestedThreads = parseThreads(command);
@@ -191,6 +219,7 @@ int main(int argc, char** argv) {
                 return task.status == cget::TaskStatus::Completed ? 0 : 1;
             }
             case cget::CommandType::Resume: {
+                cget::DownloadManager manager;
                 (void)manager.recoverTasks();
                 auto task = manager.loadTask(command.args.at(0));
                 std::cout << "Task resumed:\n";
@@ -201,8 +230,8 @@ int main(int argc, char** argv) {
             }
         }
     } catch (const cget::CgetError& error) {
-        std::cerr << "cget: " << error.what() << '\n';
-        return 1;
+        std::cerr << "cget: " << cget::toString(error.code()) << ": " << error.what() << '\n';
+        return cget::suggestedExitCode(error.code());
     } catch (const std::exception& error) {
         std::cerr << "cget: " << error.what() << '\n';
         return 1;

@@ -172,6 +172,15 @@ DownloadTask PersistenceStore::taskFromJson(const std::string& text) const {
         if (root.contains("expected_sha256") && !root.at("expected_sha256").isNull()) {
             task.expectedSha256 = root.at("expected_sha256").asString();
         }
+        if (root.contains("remote_etag") && !root.at("remote_etag").isNull()) {
+            task.remoteEtag = root.at("remote_etag").asString();
+        }
+        if (root.contains("remote_last_modified") && !root.at("remote_last_modified").isNull()) {
+            task.remoteLastModified = root.at("remote_last_modified").asString();
+        }
+        if (root.contains("final_url") && !root.at("final_url").isNull()) {
+            task.finalUrl = root.at("final_url").asString();
+        }
         if (root.contains("requested_threads")) {
             task.requestedThreads = asUint32(root.at("requested_threads"));
         }
@@ -219,6 +228,10 @@ std::string PersistenceStore::taskToJson(const DownloadTask& task) const {
     root["requested_threads"] = json::Value(static_cast<std::uint64_t>(task.requestedThreads));
     root["last_error"] = task.lastError ? json::Value(*task.lastError) : json::Value(nullptr);
     root["expected_sha256"] = task.expectedSha256 ? json::Value(*task.expectedSha256) : json::Value(nullptr);
+    root["remote_etag"] = task.remoteEtag ? json::Value(*task.remoteEtag) : json::Value(nullptr);
+    root["remote_last_modified"] =
+        task.remoteLastModified ? json::Value(*task.remoteLastModified) : json::Value(nullptr);
+    root["final_url"] = task.finalUrl ? json::Value(*task.finalUrl) : json::Value(nullptr);
     root["chunks"] = json::Value(std::move(chunks));
     return json::stringify(json::Value(std::move(root)));
 }
@@ -237,7 +250,10 @@ std::optional<DownloadTask> PersistenceStore::tryLoadTaskFile(const std::filesys
 void PersistenceStore::repairFromDisk(DownloadTask& task) const {
     if (task.chunks.empty()) {
         if (task.status == TaskStatus::Downloading || task.status == TaskStatus::Retrying) {
-            task.status = TaskStatus::Paused;
+            task.status = task.fileSize == 0 ? TaskStatus::Paused : TaskStatus::PendingRecovery;
+            if (task.status == TaskStatus::PendingRecovery) {
+                task.lastError = "task was interrupted before chunk state was available";
+            }
         }
         return;
     }

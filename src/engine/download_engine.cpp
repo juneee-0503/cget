@@ -21,6 +21,43 @@ std::uint64_t recomputeDownloaded(const DownloadTask& task) {
     return total;
 }
 
+LoggerOptions loggerOptionsFromConfig(const Config& config) {
+    LoggerOptions options;
+    options.level = logLevelFromString(config.logging.level);
+    options.console = config.logging.console;
+    options.maxFileBytes = config.logging.maxFileBytes;
+    options.maxRotatedFiles = config.logging.maxRotatedFiles;
+    return options;
+}
+
+bool metadataChanged(const DownloadTask& task, const RemoteFileInfo& info) {
+    if (task.fileSize != 0 && info.fileSize != 0 && task.fileSize != info.fileSize) {
+        return true;
+    }
+    if (task.remoteEtag && info.etag && *task.remoteEtag != *info.etag) {
+        return true;
+    }
+    if (task.remoteLastModified && info.lastModified && *task.remoteLastModified != *info.lastModified) {
+        return true;
+    }
+    return false;
+}
+
+void rememberMetadata(DownloadTask& task, const RemoteFileInfo& info) {
+    if (info.fileSize != 0) {
+        task.fileSize = info.fileSize;
+    }
+    if (info.etag) {
+        task.remoteEtag = info.etag;
+    }
+    if (info.lastModified) {
+        task.remoteLastModified = info.lastModified;
+    }
+    if (!info.finalUrl.empty()) {
+        task.finalUrl = info.finalUrl;
+    }
+}
+
 }  // namespace
 
 struct DownloadEngine::RateLimiter {
@@ -54,7 +91,7 @@ DownloadEngine::DownloadEngine(std::unique_ptr<ProtocolHandler> protocol,
       fileSystem_(std::move(fileSystem)),
       persistence_(std::move(persistence)),
       config_(config),
-      logger_(fileSystem_) {}
+      logger_(fileSystem_, loggerOptionsFromConfig(config)) {}
 
 void DownloadEngine::download(DownloadTask& task) {
     try {
@@ -70,12 +107,13 @@ void DownloadEngine::download(DownloadTask& task) {
         logger_.info("started task " + task.id + " for " + task.url);
 
         const auto info = protocol_->fetchMetadata(task.url);
-        if (task.fileSize != 0 && info.fileSize != 0 && task.fileSize != info.fileSize) {
-            setFailure(task, TaskStatus::MetadataMismatch, "remote file size changed");
+        if (metadataChanged(task, info)) {
+            setFailure(task, TaskStatus::MetadataMismatch, "remote file metadata changed");
             return;
         }
 
-        task.fileSize = info.fileSize;
+        rememberMetadata(task, info);
+        persistTask(task);
         if (task.fileSize == 0) {
             downloadSingleStream(task, info);
         } else if (info.supportsRange && normalizedThreadCount(task) > 1) {
@@ -109,7 +147,7 @@ void DownloadEngine::downloadWithRange(DownloadTask& task, const RemoteFileInfo&
     std::mutex errorsMutex;
     std::vector<WorkerError> errors;
     std::vector<std::thread> workers;
-    RateLimiter limiter(config_.maxDownloadRateBytesPerSec);
+    RateLimiter limiter(config_.download.maxDownloadRateBytesPerSec);
 
     for (auto& chunk : task.chunks) {
         if (chunk.status == ChunkStatus::Completed || chunk.downloaded.load() >= chunk.size()) {
@@ -198,7 +236,7 @@ void DownloadEngine::downloadSingleStream(DownloadTask& task, const RemoteFileIn
     }
 
     auto lastPersist = std::chrono::steady_clock::now();
-    RateLimiter limiter(config_.maxDownloadRateBytesPerSec);
+    RateLimiter limiter(config_.download.maxDownloadRateBytesPerSec);
     protocol_->downloadSingle(
         task.url,
         [&](const char* data, std::size_t size) {
@@ -214,7 +252,7 @@ void DownloadEngine::downloadSingleStream(DownloadTask& task, const RemoteFileIn
             task.downloaded.fetch_add(bytes);
             limiter.throttle(bytes);
             const auto now = std::chrono::steady_clock::now();
-            if (now - lastPersist >= std::chrono::seconds(1)) {
+            if (now - lastPersist >= std::chrono::milliseconds(config_.persistence.flushIntervalMs)) {
                 lastPersist = now;
                 persistTask(task);
             }
@@ -250,7 +288,7 @@ void DownloadEngine::downloadSingleStream(DownloadTask& task, const RemoteFileIn
 }
 
 void DownloadEngine::downloadChunkWithRetry(DownloadTask& task, Chunk& chunk, RateLimiter& limiter) {
-    for (std::uint32_t attempt = 0; attempt <= config_.maxRetries; ++attempt) {
+    for (std::uint32_t attempt = 0; attempt <= config_.network.maxRetries; ++attempt) {
         try {
             const auto existing = fileSystem_.fileSize(fileSystem_.chunkPath(task, chunk));
             if (existing > chunk.size()) {
@@ -298,7 +336,7 @@ void DownloadEngine::downloadChunkWithRetry(DownloadTask& task, Chunk& chunk, Ra
                     task.downloaded.fetch_add(bytes);
                     limiter.throttle(bytes);
                     const auto now = std::chrono::steady_clock::now();
-                    if (now - lastPersist >= std::chrono::seconds(1)) {
+                    if (now - lastPersist >= std::chrono::milliseconds(config_.persistence.flushIntervalMs)) {
                         lastPersist = now;
                         persistTask(task);
                     }
@@ -320,7 +358,7 @@ void DownloadEngine::downloadChunkWithRetry(DownloadTask& task, Chunk& chunk, Ra
             return;
         } catch (const CgetError& error) {
             if (error.code() == ErrorCode::RangeNotSupportedError || error.code() == ErrorCode::MetadataMismatchError ||
-                error.code() == ErrorCode::HttpStatusError || attempt == config_.maxRetries) {
+                error.code() == ErrorCode::HttpStatusError || attempt == config_.network.maxRetries) {
                 std::lock_guard lock(task.mutex);
                 chunk.status = ChunkStatus::Failed;
                 chunk.retryCount = attempt;
@@ -335,7 +373,7 @@ void DownloadEngine::downloadChunkWithRetry(DownloadTask& task, Chunk& chunk, Ra
             }
             persistTask(task);
             const auto multiplier = static_cast<std::uint32_t>(1U << std::min<std::uint32_t>(attempt, 10));
-            std::this_thread::sleep_for(std::chrono::milliseconds(config_.retryBaseDelayMs * multiplier));
+            std::this_thread::sleep_for(std::chrono::milliseconds(config_.network.retryBaseDelayMs * multiplier));
         }
     }
 }
@@ -375,7 +413,7 @@ std::uint32_t DownloadEngine::normalizedThreadCount(const DownloadTask& task) co
     if (task.requestedThreads != 0) {
         return std::clamp<std::uint32_t>(task.requestedThreads, 1, 32);
     }
-    return std::clamp<std::uint32_t>(config_.maxThreads, 1, 32);
+    return std::clamp<std::uint32_t>(config_.download.maxThreads, 1, 32);
 }
 
 }  // namespace cget

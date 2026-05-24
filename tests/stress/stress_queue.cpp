@@ -94,7 +94,7 @@ int main() {
                 store.saveTask(task);
 
                 cget::Config config;
-                config.maxThreads = 4;
+                config.download.maxThreads = 4;
                 cget::DownloadEngine engine(std::make_unique<FakeProtocol>(payload), fs, store, config);
                 engine.download(task);
                 assert(task.status == cget::TaskStatus::Completed);

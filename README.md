@@ -14,6 +14,8 @@ The codebase is intentionally modular. CLI parsing, task management, download ex
 
 cget is intended to be maintained as a long-term open-source project. APIs, command syntax, and internal architecture may continue to evolve before a stable release, but the current foundation is already structured for incremental protocol, scheduling, and reliability improvements.
 
+Chinese engineering documentation is available under [`docs/`](docs/README.md). The docs describe the current architecture, configuration model, recovery behavior, testing strategy, and planned roadmap.
+
 ## Features
 
 - **Command-line interface**: Provides implemented commands for adding tasks, queueing tasks, running queued downloads, resuming, listing, showing status, editing config, viewing protocols, and recovering persisted state.
@@ -24,9 +26,11 @@ cget is intended to be maintained as a long-term open-source project. APIs, comm
 - **Persistent task state**: Writes task JSON files under the cget home directory and keeps backup files for recovery from corrupted writes.
 - **Retry mechanism**: Retries recoverable chunk failures with configurable retry count and base delay.
 - **Network interruption recovery**: Repairs in-memory task progress from actual partial files during recovery, so stale JSON progress is corrected conservatively.
+- **Remote metadata checks**: Stores ETag, Last-Modified, and final URL metadata where available, and blocks unsafe resume attempts when remote metadata changes.
 - **SHA256 verification**: Supports task-level `--sha256` validation after the final file is assembled.
 - **Rate limiting**: Supports a global `max_download_rate_bytes_per_sec` configuration value.
 - **Proxy support**: Supports optional libcurl proxy configuration for HTTP, HTTPS, and SOCKS-style proxy URLs.
+- **Configurable logging**: Supports log levels, file logging, optional console logging, and simple log rotation.
 - **Modular architecture**: Keeps CLI, core task logic, engine, network, persistence, filesystem, config, logging, and tests in separate modules.
 - **Cross-platform build target**: Uses CMake, C++20, `std::filesystem`, threads, and libcurl to target macOS, Linux, and Windows-compatible development paths.
 - **Future protocol extension support**: Includes a protocol registry and libcurl-backed adapter boundary for HTTP, HTTPS, FTP, FTPS, and conditionally available SFTP/SCP support depending on the local libcurl build.
@@ -63,6 +67,23 @@ cget/
 │       ├── filesystem/
 │       ├── network/
 │       └── persistence/
+├── docs/
+│   ├── README.md
+│   ├── architecture.md
+│   ├── cli.md
+│   ├── configuration.md
+│   ├── contributing.md
+│   ├── filesystem.md
+│   ├── git-workflow.md
+│   ├── network.md
+│   ├── persistence.md
+│   ├── recovery.md
+│   ├── release.md
+│   ├── roadmap.md
+│   ├── scheduler.md
+│   ├── task-model.md
+│   ├── testing.md
+│   └── troubleshooting.md
 ├── src/
 │   ├── cli/
 │   ├── config/
@@ -120,6 +141,9 @@ ctest --test-dir build --output-on-failure
 Optional engineering builds:
 
 ```bash
+cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DCGET_WARNINGS_AS_ERRORS=ON
+cmake --build build-release
+
 cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DCGET_ENABLE_ASAN=ON
 cmake --build build-asan
 ctest --test-dir build-asan --output-on-failure
@@ -169,20 +193,25 @@ cget remove <task-id>
 cget recover
 
 cget config get
-cget config get max_threads
-cget config set max_threads 8
-cget config set max_active_tasks 2
-cget config set max_retries 3
-cget config set retry_base_delay_ms 1000
-cget config set max_download_rate_bytes_per_sec 0
-cget config set proxy none
-cget config set proxy http://127.0.0.1:8080
+cget config get download.max_threads
+cget config set download.max_threads 8
+cget config set download.max_active_tasks 2
+cget config set network.max_retries 3
+cget config set network.retry_base_delay_ms 1000
+cget config set download.max_download_rate_bytes_per_sec 0
+cget config set network.proxy none
+cget config set network.proxy http://127.0.0.1:8080
+cget config set logging.level debug
 ```
+
+Legacy config keys such as `max_threads`, `max_active_tasks`, `max_retries`, `retry_base_delay_ms`, `max_download_rate_bytes_per_sec`, and `proxy` remain supported.
 
 ### Planned Commands / Capabilities
 
+- `repair <task-id>` for conservative task repair.
+- `verify <task-id>` for standalone checksum verification.
+- `list --json` and `status --json` for script-friendly output.
 - Background daemon mode for pausing an actively running task from another process.
-- JSON output mode for scripts and CI.
 - Remote control API.
 - Package manager distribution.
 - More protocol-specific authentication options.
@@ -220,6 +249,8 @@ Add a new module by creating matching headers under `include/cget/<module>/` and
 
 Extend the protocol layer by adding a new `ProtocolHandler` implementation or extending the registry. Keep protocol-specific details out of the download manager and download engine unless the engine needs a generic capability flag.
 
+Version numbers are tracked in `CMakeLists.txt`, `include/cget/version.hpp`, and `CHANGELOG.md`. Keep them aligned when preparing a release.
+
 Before submitting code:
 
 ```bash
@@ -236,6 +267,8 @@ For concurrency or memory-sensitive changes, also run sanitizer and stress build
 3. Commit focused changes with clear messages.
 4. Open a Pull Request with test notes and behavior changes.
 
+The full Git workflow is documented in [`docs/git-workflow.md`](docs/git-workflow.md), and contributor basics are in [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
 Suggested branch names:
 
 - `feature/download-engine`
@@ -243,6 +276,10 @@ Suggested branch names:
 - `docs/readme-update`
 - `refactor/task-scheduler`
 
+## License
+
+No `LICENSE` file is currently included. MIT License is a reasonable default for this project when the repository is ready for public distribution.
+
 ## Project Status
 
-> cget is currently under active development. APIs, command syntax, and internal architecture may change before the first stable release.
+> cget is currently in the v1.1 engineering hardening stage. APIs, command syntax, and internal architecture may change before the first stable release.
